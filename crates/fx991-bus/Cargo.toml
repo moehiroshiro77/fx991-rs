@@ -1,0 +1,10 @@
+[package]
+name = "fx991-bus"
+description = "24-bit address space: ROM windows, battery-backed RAM, SFR regions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nxu8-core = { workspace = true }

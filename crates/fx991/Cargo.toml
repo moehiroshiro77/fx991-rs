@@ -1,0 +1,17 @@
+[package]
+name = "fx991"
+description = "fx-991CN X emulator: Emu facade and Calculator front end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+testkit = { workspace = true }
+
+[dependencies]
+fx991-model = { workspace = true }
+fx991-chipset = { workspace = true }
+fx991-bus = { workspace = true }
+nxu8-core = { workspace = true }
+nxu8-asm = { workspace = true }

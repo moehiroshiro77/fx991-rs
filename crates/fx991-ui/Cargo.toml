@@ -1,0 +1,14 @@
+[package]
+name = "fx991-ui"
+description = "fx-991CN X face renderer: composes the skin, indicators and dot matrix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx991 = { workspace = true }
+fx991-chipset = { workspace = true }
+
+[dev-dependencies]
+testkit = { workspace = true }

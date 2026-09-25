@@ -1,0 +1,11 @@
+[package]
+name = "testkit"
+description = "Shared test fixtures: locating the ROM and data files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nxu8-core = { workspace = true }
+fx991 = { workspace = true }

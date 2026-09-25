@@ -1,0 +1,14 @@
+# Lock
+Cargo.lock
+
+# Build output
+/target/
+
+/data/
+
+# Editor and OS noise
+*.swp
+.DS_Store
+Thumbs.db
+.vscode
+.idea

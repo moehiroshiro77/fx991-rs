@@ -1,0 +1,9 @@
+[package]
+name = "fx991-model"
+description = "fx-991CN X model data: measured key table, SFR map, variable format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

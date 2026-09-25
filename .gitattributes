@@ -1,0 +1,15 @@
+# Normalise line endings in the repository, and check out native ones.
+#
+# Without this, a Windows contributor's CRLF gets committed and every later diff
+# shows the whole file as changed.
+* text=auto eol=lf
+
+# Windows-only files keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary, never touched.
+*.png binary
+*.bin binary
+*.rgba binary

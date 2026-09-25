@@ -1,0 +1,12 @@
+[package]
+name = "fx991-chipset"
+description = "fx-991CN X peripherals: keyboard, screen, timer, interrupts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fx991-model = { workspace = true }
+fx991-bus = { workspace = true }
+nxu8-core = { workspace = true }

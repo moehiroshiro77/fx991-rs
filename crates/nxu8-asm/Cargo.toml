@@ -1,0 +1,10 @@
+[package]
+name = "nxu8-asm"
+description = "Table-driven nX-U8 encoder and disassembler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nxu8-core = { workspace = true }

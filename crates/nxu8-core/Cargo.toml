@@ -1,0 +1,9 @@
+[package]
+name = "nxu8-core"
+description = "Clean-room nX-U8 CPU core: registers, opcode table, instruction handlers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

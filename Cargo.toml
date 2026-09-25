@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nxu8-core",
+    "crates/nxu8-asm",
+    "crates/fx991-bus",
+    "crates/fx991-model",
+    "crates/fx991-chipset",
+    "crates/fx991",
+    "crates/fx991-ui",
+    "crates/fx991-app",
+    "crates/fx991-cli",
+    "crates/testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+nxu8-core = { path = "crates/nxu8-core" }
+nxu8-asm = { path = "crates/nxu8-asm" }
+fx991-bus = { path = "crates/fx991-bus" }
+fx991-model = { path = "crates/fx991-model" }
+fx991-chipset = { path = "crates/fx991-chipset" }
+fx991 = { path = "crates/fx991" }
+fx991-ui = { path = "crates/fx991-ui" }
+fx991-app = { path = "crates/fx991-app" }
+testkit = { path = "crates/testkit" }
+
+# Zero third-party dependencies, deliberately: the emulator only needs the
+# standard library, and a self-contained build keeps the research reproducible
+# offline.  PNG output uses stored (uncompressed) deflate blocks.
+[profile.release]
+opt-level = 3
+lto = "thin"

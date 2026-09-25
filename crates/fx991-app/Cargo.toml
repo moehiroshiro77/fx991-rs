@@ -1,0 +1,23 @@
+[package]
+name = "fx991-app"
+description = "fx-991CN X desktop UI: a wgpu window you can click keys on"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fx991cnx"
+path = "src/main.rs"
+
+[dependencies]
+fx991 = { workspace = true }
+fx991-ui = { workspace = true }
+fx991-model = { workspace = true }
+fx991-bus = { workspace = true }
+wgpu = "27"
+winit = "0.30"
+pollster = "0.4"
+
+[dev-dependencies]
+testkit = { workspace = true }
