@@ -374,9 +374,9 @@ impl Frame {
             return;
         }
         let offset = ((y * self.width + x) * 4) as usize;
-        for channel in 0..3 {
-            self.rgba[offset + channel] =
-                blend_channel(rgb[channel], alpha, self.rgba[offset + channel]);
+        let dest = &mut self.rgba[offset..offset + 3];
+        for (dst, src) in dest.iter_mut().zip(rgb) {
+            *dst = blend_channel(src, alpha, *dst);
         }
         // The stamp is opaque, so the destination alpha becomes 255.
         self.rgba[offset + 3] = 255;

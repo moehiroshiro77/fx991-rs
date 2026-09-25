@@ -3,6 +3,8 @@
 An emulator for the **Casio fx-991CN X** (VerF) scientific calculator, written in
 Rust. It runs the calculator's real firmware.
 
+English | [简体中文](README.zh.md)
+
 [![CI](https://github.com/moehiroshiro77/fx991-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/moehiroshiro77/fx991-rs/actions/workflows/ci.yml)
 
 ## What you need to supply
@@ -71,10 +73,12 @@ which.
 
 The most useful reference by far, and the reason this project was tractable. It
 documents the peripheral map, the timer and interrupt model, and the display
-compositing in enough detail to check an implementation against. Like this
-project, it is GPL-3.0.
+compositing in enough detail to check an implementation against. This project's
+structure follows it: the crate split, the handler names (`OP_PUSH` → `op_push`)
+and the screen constants (`N_ROW`, `ROW_SIZE`, `OFFSET`) all come from there,
+which is why this repository is GPL-3.0 as well.
 
-Where this emulator differs, and why:
+Where this implementation differs, and why:
 
 | | CasioEmuNeo | here | why |
 |---|---|---|---|
@@ -83,27 +87,7 @@ Where this emulator differs, and why:
 | CW-II / `TIMER_SKIPPED` branches | present | omitted | only compiled for `HW_CLASSWIZ_II`, which the VerF firmware never reaches |
 | RAM mirror at `0x49800` | present on the non-hardware model | not implemented | the VerF model reports `real_hardware = 1` |
 | coprocessor `CRn` | implemented | raises `Unimplemented` | the firmware never executes one; failing loudly beats silently mis-executing |
-| `PdValue` (`0xF050`) | registered only on the non-hardware model | not registered, reads as 0 | matches — the hole is in both |
 | display font | sprites from `interface.png` | bit-per-pixel dot matrix | enough for debugging; the UI composes the real skin |
-
-Four behaviours were established by experiment here, and they are the ones worth
-knowing if you compare the two:
-
-* **The timer divides twice.** An instruction counter runs every instruction, but
-  the timer's own divider only ticks once per 10 000 instructions — one tick per
-  209.7 instructions at 2 Mi/s. Treating `data_interval` as "every instruction"
-  wedges the firmware in `STOP`, which looks like it ignoring input.
-* **The LCD has three states, not two.** With the display off the screen is the
-  panel colour and nothing is drawn at all. Lit dots are `(25,46,75)`; *unlit*
-  dots are `(152,167,168)` — a light wash of ink, not the background. The blend
-  rounds rather than truncates; truncating puts a channel at 151 instead of 152.
-* **A reset is not a finger.** `ON` resets the machine. The reset clears the key
-  matrix's drive state but does not lift a held key, which is exactly what the
-  self-test needs: hold `SHIFT` and `7`, press `ON`, keep holding.
-* **Several key names in the calculator's own layout file are wrong.** They are
-  screen positions, not functions — `0x07` is `SHIFT` (not `F1`), `0x03` is `STO`
-  (not `SHIFT`), `0x42` is `AC` (not `Space`). The table here was measured by
-  pressing each key and reading what the firmware stored.
 
 ### Other references
 
