@@ -179,6 +179,98 @@ pub struct AccessFault {
 /// thousands of times, so an unbounded log would be a memory leak in a long run.
 pub const MAX_LOGGED_FAULTS: usize = 4096;
 
+/// A memory access to watch for.
+///
+/// Watches are checked on every data access, so this is deliberately a flat
+/// record rather than a trait object: the debugger needs addresses and flags, and
+/// the emulator needs the check to be cheap when nothing is armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watch {
+    /// The address being watched.
+    pub address: u32,
+    /// Stop when the address is read.
+    pub read: bool,
+    /// Stop when the address is written.
+    pub write: bool,
+    /// Stop when the address is fetched as code.
+    pub execute: bool,
+}
+
+impl Watch {
+    /// Watch both data directions, which is what "watch this variable" means.
+    pub fn data(address: u32) -> Self {
+        Self {
+            address,
+            read: true,
+            write: true,
+            execute: false,
+        }
+    }
+
+    /// Whether this watch cares about an access of the given kind.
+    pub fn wants(&self, kind: Access) -> bool {
+        match kind {
+            Access::Code => self.execute,
+            Access::Read | Access::SfrRead => self.read,
+            Access::Write | Access::SfrWrite => self.write,
+        }
+    }
+}
+
+/// One access that matched a [`Watch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchHit {
+    /// What kind of access it was.
+    pub kind: Access,
+    /// The address accessed.
+    pub address: u32,
+    /// The byte read or written.  Meaningless for a code fetch.
+    pub value: u8,
+}
+
+/// How many watch hits are buffered before the oldest are dropped.
+///
+/// A watch on a hot address (an `[EA]` loop counter, say) would otherwise grow
+/// without bound during one `run`.
+pub const MAX_BUFFERED_WATCH_HITS: usize = 256;
+
+/// Which part of the address space an address falls in.
+///
+/// Worth having as a value rather than a chain of range checks at every call
+/// site, because the layout is counter-intuitive: RAM and the SFRs live in
+/// **segment 0**, not segments 0xD/0xF, so `0xD_D000` is not a RAM alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// A ROM window, with the offset into the image it maps.
+    Rom {
+        /// Base of the window in the data space.
+        base: u32,
+        /// Offset into the ROM image the window starts at.
+        rom_base: u32,
+    },
+    /// Battery-backed RAM.
+    Ram,
+    /// An SFR.
+    Sfr,
+    /// Nothing claims this address.
+    Unmapped,
+}
+
+/// Everything about a [`Bus`] that a snapshot needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BusSnapshot {
+    /// The battery-backed RAM.
+    pub ram: Vec<u8>,
+    /// Planted code blocks, by base address.
+    pub overlays: Vec<(u32, Vec<u8>)>,
+    /// Fault counter at the time of the snapshot.
+    pub fault_count: u64,
+    /// Most recent fault at the time of the snapshot.
+    pub last_fault: Option<AccessFault>,
+    /// The fault log at the time of the snapshot.
+    pub fault_log: Vec<AccessFault>,
+}
+
 /// The data space.
 pub struct Bus {
     rom: Rom,
@@ -188,6 +280,18 @@ pub struct Bus {
     /// Overlays consulted before the ROM image, so a test can plant a program
     /// somewhere without mutating the image.
     overlays: Vec<(u32, Vec<u8>)>,
+
+    /// Addresses the caller asked to be told about.
+    watches: Vec<Watch>,
+    /// Accesses that matched a watch, since the last drain.
+    watch_hits: Vec<WatchHit>,
+    /// Every match, including ones past the buffer limit.
+    watch_hit_count: u64,
+
+    /// While set, accesses are neither recorded as faults nor reported to
+    /// watches.  A debugger reading memory must not look like the guest reading
+    /// it, and must not perturb the fault counters tests assert on.
+    quiet: bool,
 
     /// Total faults seen, including ones past the log limit.
     pub fault_count: u64,
@@ -205,6 +309,10 @@ impl Bus {
             ram: vec![0; RAM_SIZE as usize],
             devices: Vec::new(),
             overlays: Vec::new(),
+            watches: Vec::new(),
+            watch_hits: Vec::new(),
+            watch_hit_count: 0,
+            quiet: false,
             fault_count: 0,
             last_fault: None,
             fault_log: Vec::new(),
@@ -231,7 +339,121 @@ impl Bus {
         &mut self.ram
     }
 
+    // ------------------------------------------------------------------ regions
+
+    /// Which part of the address space `address` falls in.
+    pub fn region(&self, address: u32) -> Region {
+        if let Some(window) = self.window_for(address) {
+            return Region::Rom {
+                base: window.base,
+                rom_base: window.rom_base,
+            };
+        }
+        if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&address) {
+            return Region::Ram;
+        }
+        if (SFR_BASE..=SFR_END).contains(&address) {
+            return Region::Sfr;
+        }
+        Region::Unmapped
+    }
+
+    // ------------------------------------------------------------------ watches
+
+    /// Watch an address, replacing any watch already there.
+    pub fn watch(&mut self, watch: Watch) {
+        self.watches
+            .retain(|existing| existing.address != watch.address);
+        self.watches.push(watch);
+    }
+
+    /// Stop watching an address.  Returns whether anything was removed.
+    pub fn unwatch(&mut self, address: u32) -> bool {
+        let before = self.watches.len();
+        self.watches.retain(|watch| watch.address != address);
+        self.watches.len() != before
+    }
+
+    /// Every armed watch, in the order they were added.
+    pub fn watches(&self) -> &[Watch] {
+        &self.watches
+    }
+
+    /// Drop every watch.
+    pub fn clear_watches(&mut self) {
+        self.watches.clear();
+        self.watch_hits.clear();
+    }
+
+    /// Take the hits recorded since the last call.
+    pub fn take_watch_hits(&mut self) -> Vec<WatchHit> {
+        std::mem::take(&mut self.watch_hits)
+    }
+
+    /// The hits recorded since the last drain, without removing them.
+    pub fn watch_hits(&self) -> &[WatchHit] {
+        &self.watch_hits
+    }
+
+    /// How many accesses have matched a watch in total.
+    ///
+    /// Unlike the buffer this is not reset by draining, so a caller can tell
+    /// "many hits, most dropped" from "no hits".
+    pub fn watch_hit_count(&self) -> u64 {
+        self.watch_hit_count
+    }
+
+    /// Record an access against the armed watches.
+    fn note_access(&mut self, kind: Access, address: u32, value: u8) {
+        if self.watches.is_empty() {
+            return;
+        }
+        if !self.watches.iter().any(|watch| watch.wants(kind)) {
+            return;
+        }
+        self.watch_hit_count += 1;
+        if self.watch_hits.len() < MAX_BUFFERED_WATCH_HITS {
+            self.watch_hits.push(WatchHit {
+                kind,
+                address,
+                value,
+            });
+        }
+    }
+
+    // -------------------------------------------------------------- quiet reads
+
+    /// Read a data byte without recording a fault or reporting a watch.
+    ///
+    /// This is what a debugger's memory view, disassembler, and condition
+    /// evaluator use: the guest did not make this access, so it must not show up
+    /// in the fault log or trip a watchpoint on its own.
+    pub fn peek_quiet(&mut self, address: u32) -> u8 {
+        self.quiet = true;
+        let value = self.read_data_plain(address & 0x00FF_FFFF);
+        self.quiet = false;
+        value
+    }
+
+    /// [`Bus::peek_quiet`] over a range.
+    pub fn peek_quiet_block(&mut self, address: u32, length: usize) -> Vec<u8> {
+        (0..length as u32)
+            .map(|offset| self.peek_quiet(address + offset))
+            .collect()
+    }
+
+    /// Fetch a code halfword without recording a fault or reporting a watch.
+    pub fn read_code_quiet(&mut self, address: u32) -> u16 {
+        self.quiet = true;
+        let value = self.read_code_plain(address);
+        self.quiet = false;
+        value
+    }
+
     fn record(&mut self, kind: Access, address: u32) {
+        if self.quiet {
+            return;
+        }
         self.fault_count += 1;
         let fault = AccessFault { kind, address };
         self.last_fault = Some(fault);
@@ -243,10 +465,52 @@ impl Bus {
     /// Plant a byte block that code fetches and data reads see instead of ROM.
     ///
     /// Used by tests and by the M5 experiments to build a program where the ROM
-    /// never looks.
+    /// never looks.  Note that an overlay shadows **both** the code fetch and the
+    /// data read at the address, and that a block of odd length will pair its
+    /// last byte with `0` on a fetch.
     pub fn load_code(&mut self, address: u32, blob: &[u8]) {
         self.overlays.retain(|(base, _)| *base != address);
         self.overlays.push((address, blob.to_vec()));
+    }
+
+    /// Every planted code block, by base address.
+    pub fn overlays(&self) -> &[(u32, Vec<u8>)] {
+        &self.overlays
+    }
+
+    /// Remove a planted block.  Returns whether there was one.
+    ///
+    /// Patch management needs this: without it a patch could only be replaced,
+    /// never removed.
+    pub fn clear_code(&mut self, address: u32) -> bool {
+        let before = self.overlays.len();
+        self.overlays.retain(|(base, _)| *base != address);
+        self.overlays.len() != before
+    }
+
+    /// Everything a snapshot needs to restore this bus.
+    pub fn snapshot(&self) -> BusSnapshot {
+        BusSnapshot {
+            ram: self.ram.clone(),
+            overlays: self.overlays.clone(),
+            fault_count: self.fault_count,
+            last_fault: self.last_fault,
+            fault_log: self.fault_log.clone(),
+        }
+    }
+
+    /// Put the bus back the way it was when `snapshot` was taken.
+    ///
+    /// Devices are not part of a snapshot: the registered `SfrDevice`s are
+    /// routing shells that point at peripherals owned elsewhere, so their state
+    /// travels with the chipset's own snapshot rather than with the bus.
+    pub fn restore(&mut self, snapshot: &BusSnapshot) {
+        let length = snapshot.ram.len().min(self.ram.len());
+        self.ram[..length].copy_from_slice(&snapshot.ram[..length]);
+        self.overlays.clone_from(&snapshot.overlays);
+        self.fault_count = snapshot.fault_count;
+        self.last_fault = snapshot.last_fault;
+        self.fault_log.clone_from(&snapshot.fault_log);
     }
 
     fn overlay_byte(&self, address: u32) -> Option<u8> {
@@ -265,7 +529,8 @@ impl Bus {
             .find(|window| address >= window.base && address < window.base + window.size)
     }
 
-    fn read_data_inner(&mut self, address: u32) -> u8 {
+    /// The data read, without any watcher bookkeeping.
+    fn read_data_plain(&mut self, address: u32) -> u8 {
         if let Some(byte) = self.overlay_byte(address) {
             return byte;
         }
@@ -292,7 +557,41 @@ impl Bus {
         0
     }
 
-    fn write_data_inner(&mut self, address: u32, value: u8) {
+    fn read_data_inner(&mut self, address: u32) -> u8 {
+        let value = self.read_data_plain(address);
+        if !self.quiet {
+            let kind = self.classify_data_read(address);
+            self.note_access(kind, address, value);
+        }
+        value
+    }
+
+    /// Which kind of fault a read of `address` would be recorded as.
+    ///
+    /// Only consulted when a watch is armed, so the ordinary path does not pay
+    /// for it.
+    fn classify_data_read(&self, address: u32) -> Access {
+        if self.window_for(address).is_some()
+            || self.overlay_byte(address).is_some()
+            || (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&address)
+        {
+            Access::Read
+        } else if (SFR_BASE..=SFR_END).contains(&address) {
+            Access::SfrRead
+        } else {
+            Access::Read
+        }
+    }
+
+    fn classify_data_write(&self, address: u32) -> Access {
+        if (SFR_BASE..=SFR_END).contains(&address) {
+            Access::SfrWrite
+        } else {
+            Access::Write
+        }
+    }
+
+    fn write_data_plain(&mut self, address: u32, value: u8) {
         if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&address) {
             self.ram[(address - RAM_BASE) as usize] = value;
             return;
@@ -313,14 +612,21 @@ impl Bus {
         self.record(Access::Write, address);
     }
 
+    fn write_data_inner(&mut self, address: u32, value: u8) {
+        if !self.quiet {
+            let kind = self.classify_data_write(address);
+            self.note_access(kind, address, value);
+        }
+        self.write_data_plain(address, value);
+    }
+
     /// The fault kinds seen so far, for a test to assert against.
     pub fn fault_kinds(&self) -> Vec<AccessFault> {
         self.fault_log.clone()
     }
-}
 
-impl Memory for Bus {
-    fn read_code(&mut self, address: u32) -> u16 {
+    /// The code fetch, without any watcher bookkeeping.
+    fn read_code_plain(&mut self, address: u32) -> u16 {
         if let Some(byte) = self.overlay_byte(address) {
             let high = self.overlay_byte(address + 1).unwrap_or(0);
             return u16::from_le_bytes([byte, high]);
@@ -348,13 +654,25 @@ impl Memory for Bus {
             }
         }
     }
+}
+
+impl Memory for Bus {
+    fn read_code(&mut self, address: u32) -> u16 {
+        let value = self.read_code_plain(address);
+        // Code fetches are watched only when something asked for them; the
+        // ordinary path pays one length check.
+        if !self.quiet && self.watches.iter().any(|watch| watch.execute) {
+            self.note_access(Access::Code, address, value as u8);
+        }
+        value
+    }
 
     fn read_data(&mut self, address: u32) -> u8 {
         self.read_data_inner(address & 0x00FF_FFFF)
     }
 
     fn write_data(&mut self, address: u32, value: u8) {
-        self.write_data_inner(address & 0x00FF_FFFF, value)
+        self.write_data_inner(address & 0x00FF_FFFF, value);
     }
 }
 
@@ -496,5 +814,240 @@ mod tests {
         }
         assert_eq!(bus.fault_count, MAX_LOGGED_FAULTS as u64 + 100);
         assert_eq!(bus.fault_log.len(), MAX_LOGGED_FAULTS);
+    }
+
+    // ------------------------------------------------------------------ regions
+
+    #[test]
+    fn regions_follow_the_segment_zero_map() {
+        let bus = Bus::new(rom32k());
+        assert_eq!(
+            bus.region(0x0_0100),
+            Region::Rom {
+                base: 0x0_0000,
+                rom_base: 0x0_0000
+            }
+        );
+        assert_eq!(
+            bus.region(0x1_0100),
+            Region::Rom {
+                base: 0x1_0000,
+                rom_base: 0x1_0000
+            }
+        );
+        // Segment 5 is the second window onto the bottom of the image.
+        assert_eq!(
+            bus.region(0x5_0100),
+            Region::Rom {
+                base: 0x5_0000,
+                rom_base: 0x0_0000
+            }
+        );
+        // RAM and the SFRs are in segment 0, not 0xD/0xF.
+        assert_eq!(bus.region(0x0_D180), Region::Ram);
+        assert_eq!(bus.region(0x0_F042), Region::Sfr);
+        assert_eq!(bus.region(0xD_D180), Region::Unmapped);
+        assert_eq!(bus.region(0x6_0000), Region::Unmapped);
+    }
+
+    // ------------------------------------------------------------------- quiet
+
+    #[test]
+    fn a_quiet_read_records_no_fault() {
+        let mut bus = Bus::new(rom32k());
+        assert_eq!(bus.peek_quiet(0x6_0000), 0);
+        assert_eq!(bus.fault_count, 0, "a debugger's read is not a guest fault");
+        assert!(bus.last_fault.is_none());
+
+        // The ordinary read still records, so the difference is real.
+        bus.read_data(0x6_0000);
+        assert_eq!(bus.fault_count, 1);
+    }
+
+    #[test]
+    fn a_quiet_read_does_not_trip_a_watch() {
+        use nxu8_core::Memory;
+
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+        bus.write_data(0x0_D180, 0x41);
+        bus.take_watch_hits();
+
+        assert_eq!(bus.peek_quiet(0x0_D180), 0x41);
+        assert!(
+            bus.take_watch_hits().is_empty(),
+            "the debugger's own read must not look like the guest's"
+        );
+
+        bus.read_data(0x0_D180);
+        assert_eq!(
+            bus.take_watch_hits().len(),
+            1,
+            "the guest's read does trip it"
+        );
+    }
+
+    #[test]
+    fn a_quiet_code_fetch_records_no_fault() {
+        let mut bus = Bus::new(rom32k());
+        bus.read_code_quiet(0x0_0000);
+        assert_eq!(bus.fault_count, 0);
+        // 0x00946A is past the 32 KiB test image, so the plain path would record.
+        bus.read_code_quiet(0x0_946A);
+        assert_eq!(bus.fault_count, 0);
+    }
+
+    // ------------------------------------------------------------------ watches
+
+    #[test]
+    fn a_watch_reports_the_value_and_direction_of_the_access() {
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+
+        use nxu8_core::Memory;
+        bus.write_data(0x0_D180, 0x5A);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0],
+            WatchHit {
+                kind: Access::Write,
+                address: 0x0_D180,
+                value: 0x5A
+            }
+        );
+
+        assert_eq!(bus.read_data(0x0_D180), 0x5A);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, Access::Read);
+        assert_eq!(hits[0].value, 0x5A);
+    }
+
+    #[test]
+    fn watch_directions_are_independent() {
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch {
+            address: 0x0_D180,
+            read: false,
+            write: true,
+            execute: false,
+        });
+
+        use nxu8_core::Memory;
+        bus.write_data(0x0_D180, 1);
+        assert_eq!(bus.take_watch_hits().len(), 1);
+        bus.read_data(0x0_D180);
+        assert!(
+            bus.take_watch_hits().is_empty(),
+            "a write-only watch ignores reads"
+        );
+    }
+
+    #[test]
+    fn an_execute_watch_sees_a_code_fetch() {
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch {
+            address: 0x0_0000,
+            read: false,
+            write: false,
+            execute: true,
+        });
+
+        use nxu8_core::Memory;
+        bus.read_code(0x0_0000);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, Access::Code);
+    }
+
+    #[test]
+    fn a_watch_on_an_unmapped_address_still_reports() {
+        // "read as 0" and "genuinely 0" are different, which is the whole point
+        // of the fault log; a watch has to behave the same way.
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x6_0000));
+        bus.read_data(0x6_0000);
+        assert_eq!(bus.take_watch_hits().len(), 1);
+        assert_eq!(bus.fault_count, 1, "and it is still a fault");
+    }
+
+    #[test]
+    fn watch_hit_count_survives_draining_but_the_buffer_is_capped() {
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+        use nxu8_core::Memory;
+        for i in 0..(MAX_BUFFERED_WATCH_HITS as u32 + 25) {
+            bus.write_data(0x0_D180, i as u8);
+        }
+        assert_eq!(bus.watch_hit_count(), MAX_BUFFERED_WATCH_HITS as u64 + 25);
+        assert_eq!(bus.take_watch_hits().len(), MAX_BUFFERED_WATCH_HITS);
+        // Draining does not reset the counter, so "many, most dropped" is
+        // distinguishable from "none".
+        assert_eq!(bus.watch_hit_count(), MAX_BUFFERED_WATCH_HITS as u64 + 25);
+        assert!(bus.take_watch_hits().is_empty());
+    }
+
+    #[test]
+    fn watches_are_replaced_by_address_and_removable() {
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+        bus.watch(Watch {
+            address: 0x0_D180,
+            read: true,
+            write: false,
+            execute: false,
+        });
+        assert_eq!(bus.watches().len(), 1, "a second watch replaces the first");
+
+        assert!(bus.unwatch(0x0_D180));
+        assert!(
+            !bus.unwatch(0x0_D180),
+            "removing twice reports nothing removed"
+        );
+        assert!(bus.watches().is_empty());
+    }
+
+    // ----------------------------------------------------------------- overlays
+
+    #[test]
+    fn a_planted_block_can_be_listed_and_removed() {
+        let mut bus = Bus::new(rom32k());
+        bus.load_code(0x1_0000, &[0x8E, 0xF2]);
+        assert_eq!(bus.overlays(), &[(0x1_0000, vec![0x8E, 0xF2])]);
+
+        assert!(bus.clear_code(0x1_0000));
+        assert!(bus.overlays().is_empty());
+        assert!(
+            !bus.clear_code(0x1_0000),
+            "clearing twice reports nothing removed"
+        );
+        assert_eq!(
+            bus.read_code(0x1_0000),
+            0x0000,
+            "the image shows through again"
+        );
+    }
+
+    // ---------------------------------------------------------------- snapshots
+
+    #[test]
+    fn a_snapshot_round_trips_the_state_it_covers() {
+        let mut bus = Bus::new(rom32k());
+        bus.write_data(0x0_D180, 0x11);
+        bus.load_code(0x1_0000, &[0x8E, 0xF2]);
+        bus.read_data(0x6_0000); // one fault, so the counters are non-trivial
+        let snapshot = bus.snapshot();
+
+        bus.write_data(0x0_D180, 0x99);
+        bus.clear_code(0x1_0000);
+        bus.read_data(0x7_0000);
+        assert_ne!(bus.snapshot(), snapshot);
+
+        bus.restore(&snapshot);
+        assert_eq!(bus.snapshot(), snapshot);
+        assert_eq!(bus.read_data(0x0_D180), 0x11);
+        assert_eq!(bus.read_code(0x1_0000), 0xF28E, "patches come back too");
+        assert_eq!(bus.fault_count, 1);
     }
 }

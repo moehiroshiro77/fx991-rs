@@ -403,7 +403,7 @@ impl ApplicationHandler for App {
                     Action::Pressed { code, stuck } => {
                         println!("key {code:#04x}{}", if stuck { " (latched)" } else { "" })
                     }
-                    Action::ReleasedAll => {}
+                    Action::ReleasedAll => println!("key release-all"),
                     Action::Missed | Action::Outside => {}
                 }
             }
@@ -432,8 +432,34 @@ impl ApplicationHandler for App {
         // resize is handled by the surface itself.
         if machine.emulator.chipset.take_frame_request() {
             window.request_redraw();
+            if std::env::var_os("FX991_TRACE_INPUT").is_some() {
+                log_input_state(&mut machine.emulator);
+            }
         }
     }
+}
+
+/// Print what the ROM did after a visible change, for correlating with key presses.
+///
+/// Enabled by `FX991_TRACE_INPUT=1`.  The input area and the screen's lit-pixel count
+/// are the two things a key sequence actually changes, and printing them next to the
+/// `key` lines makes a session's behaviour readable from the log alone -- which is
+/// how a UI-driven session can be compared against a scripted one.
+fn log_input_state(emu: &mut fx991::Emu) {
+    let input: Vec<String> = (0..12)
+        .map(|offset| format!("{:02X}", emu.peek_quiet(0xD180 + offset)))
+        .collect();
+    let (lit, mode) = {
+        let screen = emu.chipset.screen.borrow();
+        (screen.lit_pixels(), screen.mode)
+    };
+    println!(
+        "state tick={} input={} lit={} mode={}",
+        emu.ticks,
+        input.join(" "),
+        lit,
+        mode
+    );
 }
 
 #[cfg(test)]

@@ -1,0 +1,79 @@
+# How to enter the calculator's self-test: hold SHIFT and 7, then press ON.
+#
+# The claim was measured twice: once by a Python prototype kept with the research
+# notes, and once here.  The two share no code, so their agreeing is evidence rather
+# than a tautology.
+#
+# The claim:
+#
+#   Holding SHIFT and 7 while pressing ON enters the self-test, because ON is a
+#   *reset* rather than a matrix key, and a reset does not lift a finger.  The ROM's
+#   main loop at `rom:024E6E` calls the key check at `rom:02006`, which compares the
+#   keyboard input against 0x7B; only that value reaches `rom:024E76`.
+#
+# Why 0x7B: SHIFT is code 0x07 so its ki_bit is `1 << 7`, and `7` is code 0x02 so its
+# ki_bit is `1 << 2`.  The matrix lines are active low, so the byte is
+# `~(0x80 | 0x04) = 0x7B`.
+#
+# Run:  emu dbg --script scripts/selftest-entry.dbg
+
+echo === self-test entry: SHIFT + 7 held through an ON reset ===
+
+# --- boot to the key-wait loop --------------------------------------------
+# The ROM arms its key filter (`0xF042` reads 0xFF) when it is ready to see a key.
+# That is the observable ready edge, and this stops just short of it: the window is
+# narrow, and running past it leaves the scan loop again (at 500000 ticks the filter
+# already reads 00 again, and the matrix then shows nothing however hard a key is
+# held).  The assert below is what catches an overshoot.
+t 456000
+t 1000
+assert [filter] == 0xFF
+echo the ROM is waiting for a key
+
+# --- step 1: hold SHIFT and 7 ---------------------------------------------
+# `latch` is the one place a key has to stay *down*: the self-test combination is
+# read during the reset below, so both keys have to be held through it.  Two things
+# make it work:
+#
+#   * Both keys go down before the machine runs.  A chord only exists once the ROM
+#     scans with all of them held; running between presses would let the ROM finish
+#     a scan and drop its column drive, and the second key would then read as a
+#     separate press.
+#   * A latch is the keyboard's own `stuck` flag -- what the window's right-click
+#     sets -- and it survives both `release` and a reset.  That last part is the
+#     whole self-test trick: a reset is not a finger.
+#
+# `KI` only reads the combination while the ROM is driving a column (`KO`), so the
+# read below has to happen inside the scan window; `latch` leaves the machine
+# stopped at that edge.
+latch SHIFT 7
+
+echo
+echo --- what the matrix reads with both held (predicted 0x7B) ---
+m F040 4
+assert [ki] == 0x7B
+echo match: the matrix reads 7Bh, the value the ROM compares against
+
+# --- step 2: press ON ------------------------------------------------------
+# ON is not in the matrix: it resets the machine.  A reset deliberately does *not*
+# clear the held keys, because a reset is not a finger -- so SHIFT and 7 stay down
+# across it, which is the whole trick.
+echo
+echo --- pressing ON: this resets the machine without lifting SHIFT or 7 ---
+# `tap` waits for the ROM to *accept* a key, which ON never does -- it is a reset,
+# not a matrix key -- so the tap returns once the machine has re-initialised.
+tap ON
+
+# --- step 3: watch for control to reach the self-test ---------------------
+# `rom:024E76` is the call the main loop makes only when the key check returned the
+# magic combination, so arriving there is the proof it was recognised.  The `h`
+# suffix is needed: a bare five-digit run reads as decimal, and `24E76` has letters so
+# it would work too, but spelling the suffix out is the habit that avoids the
+# ambiguous all-digit case entirely.
+bp 24E76h
+g 3000000
+
+echo
+echo --- the self-test call the main loop made ---
+assert PC == 24E76h
+echo RESULT: self-test entry confirmed -- SHIFT + 7 + ON, keys held through

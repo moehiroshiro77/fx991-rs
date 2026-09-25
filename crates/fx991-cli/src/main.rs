@@ -17,7 +17,8 @@
 //! `text
 //! emu boot [--steps N]         cold-boot and print the reset state
 //! emu run --until ADDR         run to an address, with a tick budget
-//! emu disas ADDR [--count N]   disassemble from the verified listing
+//! emu disas ADDR [--count N]   disassemble; the ROM by default, --from-listing
+//!                              for the pre-generated text
 //! emu listing                  summarise the disassembly listing
 //! emu screen PATH              render the 0xF800 buffer to a PNG
 //! emu render PATH              render the whole face (skin + LCD) to a PNG
@@ -27,6 +28,8 @@
 //! `
 
 use std::process::ExitCode;
+
+mod dbg;
 
 use fx991::listing::Listing;
 use fx991::{Calculator, Emu};
@@ -55,6 +58,7 @@ fn main() -> ExitCode {
         "key" => cmd_key(rest),
         "calc" => cmd_calc(rest),
         "dump" => cmd_dump(rest),
+        "dbg" => cmd_dbg(rest),
         other => {
             eprintln!("unknown command {other:?}; try --help");
             return ExitCode::FAILURE;
@@ -75,26 +79,33 @@ emu -- fx-991CN X (VerF) emulator
 
 usage: emu <command> [options]
 
+Options go after the command: `emu calc 1+2 --rom custom.bin`, not
+`emu --rom custom.bin calc 1+2`.
+
 commands:
   boot [--steps N]              cold-boot and print the reset state
   run --until ADDR [--max N]    run to a physical address
-  disas ADDR [--count N]        disassemble from the listing
-  listing [--limit N]           summarise the disassembly listing
+  disas ADDR [--count N]        disassemble, decoding the ROM by default
+  listing [--limit N]           summarise the text listing
   screen PATH [--scale N]       render the display buffer to a PNG
   render PATH                   render the whole face (skin + LCD) to a PNG
   key KEYS [--enter]            press keys, then dump the input area
   calc EXPR                     evaluate an expression, e.g. \"1+2*3\"
   dump ADDR [LEN]               hex dump of the data space
+  dbg [--script FILE]           interactive or scripted debugger
 
 options:
   --rom PATH                    ROM image      (default data/rom_verF.bin)
   --skin PATH                   face texture   (default data/skin.rgba)
-  --listing PATH                disassembly    (default data/_disas_verF.txt)
+  --listing PATH                text listing   (default data/_disas_verF.txt)
   --run N                       ticks to run first (screen, render, dump)
   --keys KEYS                   keys to press first (render)
   --enter                       press EXE after --keys (render)
   --variables, --display        extra output for calc
   --screen PATH                 also render the display (calc)
+  --script FILE                 commands for `dbg` (default: stdin)
+  --boot N                      ticks to run before `dbg` accepts commands
+  --listing                     `disas` reads the text listing instead of the ROM
 ";
 
 // ------------------------------------------------------------------ arg helpers
@@ -248,8 +259,22 @@ fn cmd_disas(raw: &[String]) -> Result<(), String> {
         .ok_or("disas needs an address")? as u32;
     let count = args.number("count")?.unwrap_or(10) as usize;
 
-    let listing = load_listing(args.listing_path())?;
-    print!("{}", listing.disassemble(address, count));
+    // The default is to decode the ROM: that is what a debugger does, and it is what
+    // makes a patch visible.  `--from-listing` reads the pre-generated text instead,
+    // which is the reference this decoder is tested against and what a static
+    // analysis pass wants.
+    if args.flag("from-listing") {
+        let listing = load_listing(args.listing_path())?;
+        print!("{}", listing.disassemble(address, count));
+        return Ok(());
+    }
+
+    let mut emu = load(&args)?;
+    let mut read = |at: u32| emu.chipset.bus.read_code_quiet(at);
+    print!(
+        "{}",
+        nxu8_asm::disasm::disassemble(&mut read, address, count)
+    );
     Ok(())
 }
 
@@ -269,6 +294,22 @@ fn cmd_listing(raw: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn cmd_dbg(raw: &[String]) -> Result<(), String> {
+    let args = Args::parse(raw)?;
+    // `--rom` is required here rather than defaulted, because a debugger without the
+    // right image would silently report nonsense.
+    let rom = args.value("rom").unwrap_or(DEFAULT_ROM);
+    let mut emu = dbg::load_rom(rom)?;
+    let options = dbg::Options {
+        script: args.value("script").map(str::to_string),
+        // A prompt only makes sense on a terminal; a piped stdin gets no banner.
+        interactive: args.value("script").is_none()
+            && std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        boot: args.number("boot")?,
+    };
+    dbg::run(&mut emu, &options)
 }
 
 fn cmd_screen(raw: &[String]) -> Result<(), String> {

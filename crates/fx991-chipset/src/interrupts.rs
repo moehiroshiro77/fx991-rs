@@ -65,7 +65,7 @@ pub enum RunMode {
 }
 
 /// Interrupt controller state and request bookkeeping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interrupts {
     /// `0xF010`, 13 bits.
     pub mask: u16,
@@ -112,13 +112,35 @@ impl Interrupts {
     }
 
     /// Whether the mask SFR enables this source.
+    ///
+    /// The first four indices (`checkflag`, `reset`, `break`, `emulator`) are not
+    /// maskable and have no mask bit, so they are reported as always enabled rather
+    /// than underflowing the bit index.  Indices past the thirteen managed bits have
+    /// no bit either, and are reported as disabled.  A debugger listing every source
+    /// reaches both.
     pub fn enabled(&self, index: usize) -> bool {
-        self.mask & (1 << (index - MANAGED_INTERRUPT_BASE)) != 0
+        if index < MANAGED_INTERRUPT_BASE {
+            return true;
+        }
+        let bit = index - MANAGED_INTERRUPT_BASE;
+        if bit >= MANAGED_INTERRUPT_AMOUNT {
+            return false;
+        }
+        self.mask & (1 << bit) != 0
     }
 
     /// Whether the pending SFR has this source latched.
+    ///
+    /// See [`Interrupts::enabled`] for why the non-maskable indices are special.
     pub fn is_pending(&self, index: usize) -> bool {
-        self.pending & (1 << (index - MANAGED_INTERRUPT_BASE)) != 0
+        if index < MANAGED_INTERRUPT_BASE {
+            return self.active.get(index).copied().unwrap_or(false);
+        }
+        let bit = index - MANAGED_INTERRUPT_BASE;
+        if bit >= MANAGED_INTERRUPT_AMOUNT {
+            return self.active.get(index).copied().unwrap_or(false);
+        }
+        self.pending & (1 << bit) != 0
     }
 
     /// Latch the pending bit for a source.

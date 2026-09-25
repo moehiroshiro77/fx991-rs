@@ -62,6 +62,21 @@ pub struct Screen {
     pub dirty: bool,
 }
 
+/// The display's state, for snapshot and restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenState {
+    /// The raw dot-matrix buffer, including padding bytes.
+    pub buffer: Vec<u8>,
+    /// `0xF030`
+    pub range: u8,
+    /// `0xF031`
+    pub mode: u8,
+    /// `0xF032`
+    pub contrast: u8,
+    /// Set when something visible changed.
+    pub dirty: bool,
+}
+
 impl Default for Screen {
     fn default() -> Self {
         Self::new()
@@ -69,6 +84,31 @@ impl Default for Screen {
 }
 
 impl Screen {
+    /// Everything needed to put this display back where it was.
+    ///
+    /// A snapshot has to survive the round trip exactly, because the renderer's
+    /// output is a function of the buffer, `mode` and `contrast` alone: a partial
+    /// restore would draw a plausible but wrong screen.
+    pub fn snapshot(&self) -> ScreenState {
+        ScreenState {
+            buffer: self.buffer.clone(),
+            range: self.range,
+            mode: self.mode,
+            contrast: self.contrast,
+            dirty: self.dirty,
+        }
+    }
+
+    /// Restore a [`ScreenState`].
+    pub fn restore(&mut self, state: &ScreenState) {
+        let length = state.buffer.len().min(self.buffer.len());
+        self.buffer[..length].copy_from_slice(&state.buffer[..length]);
+        self.range = state.range;
+        self.mode = state.mode;
+        self.contrast = state.contrast;
+        self.dirty = state.dirty;
+    }
+
     /// A blank screen.
     pub fn new() -> Self {
         Self {

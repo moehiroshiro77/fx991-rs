@@ -10,6 +10,7 @@ members = [
     "crates/fx991-ui",
     "crates/fx991-app",
     "crates/fx991-cli",
+    "crates/fx991-dbg",
     "crates/testkit",
 ]
 
@@ -27,6 +28,7 @@ fx991-model = { path = "crates/fx991-model" }
 fx991-chipset = { path = "crates/fx991-chipset" }
 fx991 = { path = "crates/fx991" }
 fx991-ui = { path = "crates/fx991-ui" }
+fx991-dbg = { path = "crates/fx991-dbg" }
 fx991-app = { path = "crates/fx991-app" }
 testkit = { path = "crates/testkit" }
 

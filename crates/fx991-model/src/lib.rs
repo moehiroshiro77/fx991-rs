@@ -18,7 +18,7 @@
 //! * [`keys`] -- the measured matrix-to-token table, produced by pressing each
 //!   key and reading what the ROM stored.
 //! * [`variable`] -- the 10-byte BCD variable format.
-//! * [`address`] -- the named RAM addresses from `mem-spans.txt`.
+//! * [`address`] -- the named RAM addresses the rest of the workspace uses.
 
 #![warn(missing_docs)]
 

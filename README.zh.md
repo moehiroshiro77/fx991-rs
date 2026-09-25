@@ -40,6 +40,39 @@ target/release/fx991cnx                   # 可点击的窗口
 
 窗口需要显卡，命令行工具不需要。
 
+## 调试器
+
+`emu dbg` 是按原生程序调试器的样子做的：条件断点、内存监视点、单步、
+可回退快照、指令 trace、可撤销的代码补丁。
+
+```bash
+target/release/emu dbg                            # 交互式
+target/release/emu dbg --script scripts/rop-trigger.dbg
+```
+
+```text
+dbg> bp 0F968h if [filter] == 0xFF     # ROM 备好按键过滤器时停下
+dbg> wp D180 w if r0 == 0x41           # 监视写入，但只在写入该值时
+dbg> trace on 64
+dbg> g 2000000
+dbg> regs / stack / context
+dbg> snap before / restore before / diff before now
+dbg> patch 10000h POP PC               # ROP 研究：植入 gadget
+dbg> tap SHIFT / tap 8                 # 单位换算菜单，按真人的顺序打开
+```
+
+仓库带三个脚本，各自在真实固件上复现研究笔记里的一条结论：
+
+| 脚本 | 证明什么 |
+|---|---|
+| `scripts/rop-trigger.dbg` | `SP = 0xD522 + n + 2`，首个 gadget 地址落在 `0xD530 + n` |
+| `scripts/selftest-entry.dbg` | 按住 SHIFT 与 7 再按 ON 可进入自检 |
+| `scripts/lbf-converter.dbg` | `lbf/in²>kPa` 字符转换器的原理：`23h` 是历史记录的结束符 |
+
+前两者是研究笔记旁那份 Python 实验的独立重写，结果一致；第三个回答了 ROP 教科书
+对该字符为何能转换所留下的问题。完整文档（含四个值得知道的
+设计取舍）见 [`docs/debugger.md`](docs/debugger.md)。
+
 ## 许可
 
 **GNU 通用公共许可证第 3 版**，见 [`LICENSE`](LICENSE)。工作区内 10 个 crate

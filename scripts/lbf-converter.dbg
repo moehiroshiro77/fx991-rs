@@ -1,0 +1,102 @@
+# Why the character converter works: `lbf/in²>kPa` (FE23) and history records.
+#
+# The ROP tutorial's chapter 1 describes a trick for producing characters that
+# cannot be typed: enter `1` then `lbf/in²>kPa`, press =, press ↑, and the input
+# comes back as `1` followed by a two-byte character whose second byte is 00 --
+# which puts the cursor *inside* a double-byte character, where a byte can then be
+# inserted by hand.  The tutorial says the `23` byte "gets eaten" and defers the
+# reason ("由于某些原因，今后会讲").
+#
+# This script answers that.  The reason is that **byte 0x23 is a history record's
+# terminator**, and a record is read by scanning for it:
+#
+#   * The writer copies the expression, then appends 0x23.
+#   * `lbf/in²>kPa` is the two-byte character FE 23, so its own second byte is a
+#     terminator as far as the reader is concerned.
+#   * The reader stops at the first 0x23 -- the character's own second byte -- so the
+#     expression it hands back is `31 FE`, and that FE then pairs with the
+#     following 00 to form FE00.
+#
+# That is why the character comes back as `FE 00` and not `FE 23`.  The `23` is not
+# lost: it is still in memory, and the experiment below shows it, twice over.
+#
+# Run:  emu dbg --script scripts/lbf-converter.dbg
+
+echo === why FE23 becomes FE00: 0x23 terminates a history record ===
+
+# The ROM arms its key filter when it is ready to accept a key; that is the
+# observable ready edge, and the window is narrow.
+t 456000
+t 1000
+assert [filter] == 0xFF
+echo the ROM is waiting for a key
+
+# --- case 1: `1` then lbf/in2>kPa, i.e. bytes 31 FE 23 --------------------
+echo
+echo --- case 1: expression 31 FE 23 (that IS the FE23 character) ---
+poke D180 31 FE 23 00
+tap EXE
+g 800000
+
+echo
+echo the history record the ROM stored:
+m D392 16
+echo "  layout: [3 bytes mode][10 bytes answer][expression][23]"
+echo "  note the answer field: it is the BCD form of 6.894757, the lbf/in2>kPa"
+echo "  conversion factor -- the ROM evaluated the conversion before recording it."
+
+# The write is not lossy: *both* 23 bytes are in memory.  The character's own second
+# byte sits at D3A1 and the appended terminator at D3A2.
+assert [0xD3A1] == 0x23
+assert [0xD3A2] == 0x23
+echo
+echo "  D3A1 (the character's own 2nd byte) = 23h"
+echo "  D3A2 (the appended terminator)      = 23h"
+echo "  -> the writer kept both; the reader is what stops early"
+
+# --- recall it and see what the reader hands back -------------------------
+fill D180 8 0
+tap UP
+t 200000
+
+echo
+echo --- after pressing UP: what the reader gave back ---
+m D180 8
+assert [0xD180] == 0x31
+assert [0xD181] == 0xFE
+assert [0xD182] == 0x00
+echo "  the expression came back as 31 FE 00, NOT 31 FE 23:"
+echo "  the reader stopped at the character's own 23h, and the FE now pairs with"
+echo "  the following NUL -- that is the FE00 whose zero width hides it."
+
+# --- case 2: the control, a character whose second byte is not 23 ---------
+# If the explanation is right, this one must come back intact, because nothing in it
+# terminates a record early.
+echo
+echo --- case 2 (control): expression 31 FE 20, same shape but 20 is not 23h ---
+fill D392 64 0
+poke D180 31 FE 20 00
+tap EXE
+g 800000
+fill D180 8 0
+tap UP
+t 200000
+m D180 8
+assert [0xD181] == 0xFE
+assert [0xD182] == 0x20
+echo "  came back as 31 FE 20 -- intact, so it is the 23h specifically"
+
+# --- case 3: a plain 23h terminates too, wherever it appears ---------------
+# The strongest form of the claim: 23h is not special to the FE23 character.
+echo
+echo --- case 3: expression 31 23 31 (a plain 23h in the middle) ---
+fill D392 64 0
+poke D180 31 23 31 00
+tap EXE
+g 800000
+m D392 16
+echo "  everything after the 23h was dropped, so the record is 31 23 -- the scan"
+echo "  is over raw bytes and does not care whether 23h completes a character"
+
+echo
+echo RESULT: character converter explained -- 23h is the record terminator, and for FE23 the character's own second byte is what stops the read, so the recalled text is FE00

@@ -9,13 +9,14 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
 // Public License in LICENSE for more details.
 
-//! Named addresses, from -spans.txt` and the disassembly.
+//! Named addresses, from the ROM's memory-span table and the disassembly.
 //!
-//! Only addresses that something else in this workspace actually uses are listed.
-//! The full map is `mem-spans.txt`; this is the part that is load-bearing.
+//! Only addresses that something else in this workspace actually uses are listed;
+//! the full map lives in the calculator software's memory-span table, which is not
+//! part of this repository.  These are the entries load-bearing for the emulator.
 
-/// Linear input area: 200 bytes (`mem-spans.txt`, and `LABEL_INPUT_BUF` in the
-/// reference emulator's).
+/// Linear input area: 200 bytes.  The reference emulator calls it
+/// `LABEL_INPUT_BUF`.
 pub const INPUT_BUFFER: u32 = 0x0_D180;
 
 /// Length of the linear input area.
@@ -38,7 +39,7 @@ pub const VARIABLES: u32 = 0x0_D31A;
 /// `Ans`, the second slot.
 pub const VARIABLE_ANS: u32 = VARIABLES + 10;
 
-/// The variable slot order, as `mem-spans.txt` lists it.
+/// The variable slot order, as the memory-span table lists it.
 pub const VARIABLE_ORDER: [&str; 12] = [
     "M", "Ans", "A", "B", "C", "D", "E", "F", "x", "y", "PreAns", "@",
 ];
@@ -49,9 +50,9 @@ pub const VARIABLE_SIZE: u32 = 10;
 /// Screen row / font selector; 111 references in the disassembly.
 pub const SCREEN_ROW: u32 = 0x0_D137;
 
-/// Screen buffer mirror in RAM (`0xDDD4`, `mem-spans.txt`).
+/// First screen-buffer mirror in RAM, at `0xDDD4`.
 pub const SCREEN_MIRROR_A: u32 = 0x0_DDD4;
-/// Screen buffer mirror in RAM (`0xE3D4`, `mem-spans.txt`).
+/// Second screen-buffer mirror in RAM, at `0xE3D4`.
 pub const SCREEN_MIRROR_B: u32 = 0x0_E3D4;
 
 /// Input-method selection variable.

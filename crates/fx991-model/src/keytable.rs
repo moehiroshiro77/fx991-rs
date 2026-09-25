@@ -90,8 +90,12 @@ impl KeyTable {
         }
         by_name.entry("Enter".to_string()).or_insert(0x60);
         by_name.entry("POWER".to_string()).or_insert(0xFF);
-        by_name.entry("1/x".to_string()).or_insert(0x04);
-        by_name.entry("pow".to_string()).or_insert(0x05);
+        // `1/x` and `pow` used to be aliases for 0x04 and 0x05 under those keys'
+        // old, wrong names.  The keys are `(-)` and `fraction`, so the aliases now
+        // name different keys: `x^-1` is 0x24 and `x^2` is 0x25.
+        by_name.entry("reciprocal".to_string()).or_insert(0x24);
+        by_name.entry("square".to_string()).or_insert(0x25);
+        by_name.entry("power".to_string()).or_insert(0x35);
 
         Self { by_code, by_name }
     }

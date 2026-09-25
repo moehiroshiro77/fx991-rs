@@ -11,7 +11,7 @@
 
 //! Decode and encode the calculator's 10-byte variable format.
 //!
-//! Each variable slot is 10 bytes (`mem-spans.txt`):
+//! Each variable slot is 10 bytes:
 //!
 //! `text
 //! byte 0     high nibble = type (0 = floating point), low nibble = digit 1

@@ -1,0 +1,101 @@
+# Reproduce the M5 ROP trigger measurement with the debugger.
+#
+# The claim was measured twice: once by a Python prototype kept with the research
+# notes, and once here, driven from the debugger's own command language.  The two
+# share no code, so their agreeing is evidence rather than a tautology.
+#
+# The claim:
+#
+#   Putting the `an` token at offset n of the input area and evaluating sets
+#   SP = 0xD522 + n + 2, and the first gadget address goes at 0xD530 + n.
+#
+# Why: on evaluate the ROM copies the input area to the parse buffer at 0xD522
+# (`rom:0AFB6` is the store), then `rom:013CD0` runs `MOV SP,ER14` / `POP XR4` /
+# `POP QR8` / `POP PC`.  The two wide pops consume 12 bytes, so `POP PC` reads the
+# address sitting at post-`an` offset 12.
+#
+# Run:  emu dbg --script scripts/rop-trigger.dbg
+
+echo === ROP trigger: SP = 0xD522 + n + 2, first gadget at 0xD530 + n ===
+
+# --- boot to the idle loop ------------------------------------------------
+# The ROM spends its first few hundred thousand ticks booting and clearing RAM, so
+# poking the input area earlier would be overwritten.
+t 1800000
+assert PC == 0x9216
+assert SP == 0xEE34
+echo booted to the idle loop at 9216h
+
+# --- the trigger input, n = 76 -------------------------------------------
+# 76 bytes of `1` (0x31), the two-byte `an` token (0xFD 0x20), 12 bytes of epilogue
+# padding, then the chain: `POP ER0; POP PC` at 0x121A8 with two bytes for ER0, then
+# the landing gadget.  For n = 76 the predictions are SP = 0xD570 and the first
+# gadget address at 0xD57C.
+fill D180 76 0x31
+poke D1CC FD 20
+fill D1CE 12 0x30
+poke D1DA A8 21 31 30
+poke D1DE 11 22
+poke D1E0 10 21 32 30   # the landing gadget 22110h, encoded [lo, mid, 30h|csr, 30h]
+poke D1E4 00
+
+echo
+echo --- the input area as the ROM will read it ---
+m D1C8 28
+
+# --- watch the copy land in the parse buffer ------------------------------
+# The mechanism's first half.  This is also the debugger's own check that the
+# trigger input reached the ROM rather than being ignored.
+wp D522 w
+echo
+echo --- pressing EXE: this is what starts the evaluate ---
+# --- the hijack -----------------------------------------------------------
+# `rom:013CD2` is the instruction after `MOV SP,ER14`, so SP and ER14 both hold the
+# address the input was copied to.
+#
+# The breakpoint goes on **before** the key, and the tap's own settle run is what
+# reaches it: the whole trigger -- copy the input area, reach the epilogue -- happens
+# after the ROM accepts EXE, and `tap` runs its settle through the breakpoint-aware
+# runner so an armed breakpoint fires there.
+bp 13CD2
+tap EXE
+assert PC == 0x13CD2
+
+echo
+echo --- SP after the hijack (predicted 0xD570) ---
+get sp
+assert SP == 0xD570
+assert ER14 == 0xD570
+
+echo
+echo --- the hijacked stack, 12 bytes of padding then the chain ---
+m D570 20
+
+# --- run the chain --------------------------------------------------------
+# Let the epilogue's three pops run: `POP PC` takes the address at 0xD57C.
+# The hijack breakpoint has served its purpose; leaving it armed would stop the run
+# again at the same instruction.
+bc
+
+# Trace the chain, so the run shows *how* control moved rather than only that it did.
+# This is the instruction-by-instruction evidence for the mechanism: the two wide pops
+# consume the padding, `POP PC` takes the address at 0xD57C, and the next gadget sets
+# ER0 from the two bytes the chain placed for it.
+trace on 32
+echo
+echo --- running the chain ---
+# A breakpoint, not `run to`: `0x22110` is a gadget the ROM's own startup code also
+# executes on the way past, so "run to" could stop there for the wrong reason.  The
+# breakpoint plus the ER0 check below is what makes the arrival meaningful.
+bp 22110h
+g 400000
+assert PC == 22110h
+assert ER0 == 0x2211
+
+echo
+echo --- the chain, instruction by instruction ---
+trace show 12
+trace off
+
+echo
+echo RESULT: trigger mechanism measured -- SP = 0xD522 + n + 2, chain reached 22110h

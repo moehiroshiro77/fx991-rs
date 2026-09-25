@@ -31,7 +31,7 @@ use crate::regs::{Regs, PSW_Z};
 use crate::{Memory, Unimplemented};
 
 /// One decoded operand slot.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Operand {
     /// Register contents (for a register operand) or the masked opcode bits.
     pub value: u64,
@@ -42,7 +42,12 @@ pub struct Operand {
 }
 
 /// The processor.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` compares the *architectural* state and the per-instruction
+/// scratch together.  That is what a snapshot round trip and a register diff both
+/// want: two processors that compare equal will execute identically from here,
+/// which a comparison that ignored `operands` or `flags_in` would not guarantee.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     /// The register file.
     pub regs: Regs,

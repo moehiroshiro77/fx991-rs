@@ -97,6 +97,34 @@ pub struct Keyboard {
     pub dirty: bool,
 }
 
+/// The key matrix's state, for snapshot and restore.
+///
+/// The per-button pressed and stuck flags are captured rather than reduced to a
+/// set of codes: a held key is observable through the matrix, and holds
+/// deliberately survive a reset (the self-test depends on that), so a snapshot
+/// that dropped them would silently change which keys the ROM sees.  `present`
+/// and the matrix bits are derived from the fixed key table and are not state,
+/// so they are not stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardState {
+    /// `(code, pressed, stuck)` for every key the table defines.
+    pub buttons: Vec<(u8, bool, bool)>,
+    /// `0xF046` contents, low 10 bits.
+    pub keyboard_out: u16,
+    /// `0xF044` contents, low 10 bits.
+    pub keyboard_out_mask: u16,
+    /// `0xF040` contents.
+    pub keyboard_in: u8,
+    /// `0xF042` contents.
+    pub input_filter: u8,
+    /// The ghosting masks.
+    pub ghost: [u8; 8],
+    /// Whether a held key is visible to the filter.
+    pub has_input: bool,
+    /// Whether a renderer still needs to repaint the highlights.
+    pub dirty: bool,
+}
+
 impl Default for Keyboard {
     fn default() -> Self {
         Self::new()
@@ -104,6 +132,42 @@ impl Default for Keyboard {
 }
 
 impl Keyboard {
+    /// Everything needed to put the key matrix back where it was.
+    pub fn snapshot(&self) -> KeyboardState {
+        KeyboardState {
+            buttons: self
+                .buttons
+                .iter()
+                .enumerate()
+                .filter(|(_, button)| button.present)
+                .map(|(index, button)| (index as u8, button.pressed, button.stuck))
+                .collect(),
+            keyboard_out: self.keyboard_out,
+            keyboard_out_mask: self.keyboard_out_mask,
+            keyboard_in: self.keyboard_in,
+            input_filter: self.input_filter,
+            ghost: self.ghost,
+            has_input: self.has_input,
+            dirty: self.dirty,
+        }
+    }
+
+    /// Restore a [`KeyboardState`].
+    pub fn restore(&mut self, state: &KeyboardState) {
+        for (index, pressed, stuck) in &state.buttons {
+            let button = &mut self.buttons[*index as usize];
+            button.pressed = *pressed;
+            button.stuck = *stuck;
+        }
+        self.keyboard_out = state.keyboard_out;
+        self.keyboard_out_mask = state.keyboard_out_mask;
+        self.keyboard_in = state.keyboard_in;
+        self.input_filter = state.input_filter;
+        self.ghost = state.ghost;
+        self.has_input = state.has_input;
+        self.dirty = state.dirty;
+    }
+
     /// Build the matrix from the measured key table.
     pub fn new() -> Self {
         let table = KeyTable::new();

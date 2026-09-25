@@ -19,6 +19,6 @@ pub mod listing;
 pub mod throttle;
 
 pub use calculator::{Calculator, NotReady};
-pub use emu::{AddressKind, Breakpoint, BudgetExceeded, Emu, Mode, Trace};
+pub use emu::{AddressKind, Breakpoint, BudgetExceeded, Emu, EmuSnapshot, Hit, Mode, Trace};
 pub use fx991_chipset::{Chipset, RunMode, TickOutcome};
 pub use throttle::Throttle;

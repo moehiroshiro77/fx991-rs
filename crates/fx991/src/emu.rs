@@ -223,6 +223,19 @@ impl std::fmt::Display for BudgetExceeded {
 
 impl std::error::Error for BudgetExceeded {}
 
+/// Everything about the emulator that a snapshot covers.
+///
+/// Breakpoints are deliberately *not* part of it: they are the debugger's own
+/// bookkeeping rather than machine state, so rolling the machine back should not
+/// resurrect a breakpoint that was cleared in between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmuSnapshot {
+    /// The machine.
+    pub chipset: fx991_chipset::ChipsetSnapshot,
+    /// Ticks elapsed since the last reset.
+    pub ticks: u64,
+}
+
 /// The emulator façade.
 pub struct Emu {
     /// The machine.
@@ -312,6 +325,28 @@ impl Emu {
         self.chipset.bus.read_data(address)
     }
 
+    /// Read one data byte without recording a fault or tripping a watchpoint.
+    ///
+    /// This is what a debugger's own inspection uses: the guest did not make the
+    /// access, so it must not appear in the fault log and must not fire a
+    /// watchpoint by itself.
+    pub fn peek_quiet(&mut self, address: u32) -> u8 {
+        self.chipset.bus.peek_quiet(address)
+    }
+
+    /// [`Emu::peek_quiet`] over a range.
+    pub fn peek_quiet_block(&mut self, address: u32, length: usize) -> Vec<u8> {
+        self.chipset.bus.peek_quiet_block(address, length)
+    }
+
+    /// Fetch a code halfword without recording a fault or tripping a watchpoint.
+    ///
+    /// What the disassembler view uses, so scrolling it cannot perturb the
+    /// machine's fault bookkeeping.
+    pub fn read_code_quiet(&mut self, address: u32) -> u16 {
+        self.chipset.bus.read_code_quiet(address)
+    }
+
     /// Read a block of data bytes.
     pub fn peek_block(&mut self, address: u32, length: usize) -> Vec<u8> {
         (0..length as u32)
@@ -350,11 +385,31 @@ impl Emu {
         ram[..length].copy_from_slice(&bytes[..length]);
     }
 
+    // ------------------------------------------------------------- snapshots
+    /// The whole machine's state, for a snapshot or a diff.
+    pub fn snapshot(&self) -> EmuSnapshot {
+        EmuSnapshot {
+            chipset: self.chipset.snapshot(),
+            ticks: self.ticks,
+        }
+    }
+
+    /// Restore a snapshot.
+    ///
+    /// The tick counter goes back too: it is the unit a debugger steppers and
+    /// traces in, so leaving it advanced after a rollback would make every
+    /// subsequent record carry a time that never happened.
+    pub fn restore(&mut self, snapshot: &EmuSnapshot) {
+        self.chipset.restore(&snapshot.chipset);
+        self.ticks = snapshot.ticks;
+        self.pending_hits.clear();
+    }
+
     // -------------------------------------------------------------- stepping
     /// Execute one tick, consulting any armed breakpoints.
     pub fn step(&mut self) -> TickOutcome {
-        let mut no_extra = |_pc: u32| false;
-        self.step_with(&mut no_extra)
+        let mut no_extra = |_pc: u32, _bus: &mut fx991_bus::Bus| false;
+        self.step_with_bus(&mut no_extra)
     }
 
     /// Execute one tick with a caller-supplied hook over the physical PC.
@@ -363,13 +418,27 @@ impl Emu {
     /// accumulation possible without a `'static` bound.  Returning `true` suppresses
     /// the instruction -- see [`Mode::Stop`].
     pub fn step_with(&mut self, hook: &mut dyn FnMut(u32) -> bool) -> TickOutcome {
+        let mut adapter = |pc: u32, _bus: &mut fx991_bus::Bus| hook(pc);
+        self.step_with_bus(&mut adapter)
+    }
+
+    /// [`Emu::step_with`], with the bus visible to the hook as well.
+    ///
+    /// A debugger needs the bus here: a conditional breakpoint on `[0xD180] == 0xFF`
+    /// has to read the data space *before* the instruction runs, and re-running the
+    /// instruction to re-test the condition is not equivalent because a tick
+    /// advances the timer divider.
+    pub fn step_with_bus(
+        &mut self,
+        hook: &mut dyn FnMut(u32, &mut fx991_bus::Bus) -> bool,
+    ) -> TickOutcome {
         let tick = self.ticks + 1;
         self.pending_hits.clear();
 
         let outcome = {
             let breakpoints = &mut self.breakpoints;
             let pending = &mut self.pending_hits;
-            let mut combined = |pc: u32| -> bool {
+            let mut combined = |pc: u32, bus: &mut fx991_bus::Bus| -> bool {
                 let mut stop = false;
                 for (index, bp) in breakpoints.iter_mut().enumerate() {
                     if !bp.enabled || !bp.matches(pc) {
@@ -384,7 +453,7 @@ impl Emu {
                     bp.bump();
                     pending.push(index);
                 }
-                let caller_stop = hook(pc);
+                let caller_stop = hook(pc, bus);
                 stop || caller_stop
             };
             self.chipset.tick(Some(&mut combined))

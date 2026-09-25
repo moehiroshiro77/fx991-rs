@@ -70,6 +70,29 @@ pub struct Timer {
     ticks_per_divide: u64,
 }
 
+/// The timer's state, for snapshot and restore.
+///
+/// `instructions_since_divide` is part of it: the divider's progress decides
+/// which instruction the next timer interrupt lands on, so a snapshot that
+/// dropped it would restore a machine that is subtly out of phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerState {
+    /// `0xF020`
+    pub data_interval: u16,
+    /// `0xF022`
+    pub data_counter: u16,
+    /// `0xF024`
+    pub data_f024: u8,
+    /// `0xF025`
+    pub data_control: u8,
+    /// Whether the divider asked for an interrupt not yet serviced.
+    pub raise_required: bool,
+    /// How far the divider has counted towards the next tick.
+    pub instructions_since_divide: u64,
+    /// The divider period in use.
+    pub ticks_per_divide: u64,
+}
+
 impl Default for Timer {
     fn default() -> Self {
         Self::new()
@@ -77,6 +100,30 @@ impl Default for Timer {
 }
 
 impl Timer {
+    /// Everything needed to put the timer back where it was.
+    pub fn snapshot(&self) -> TimerState {
+        TimerState {
+            data_interval: self.data_interval,
+            data_counter: self.data_counter,
+            data_f024: self.data_f024,
+            data_control: self.data_control,
+            raise_required: self.raise_required,
+            instructions_since_divide: self.instructions_since_divide,
+            ticks_per_divide: self.ticks_per_divide,
+        }
+    }
+
+    /// Restore a [`TimerState`].
+    pub fn restore(&mut self, state: &TimerState) {
+        self.data_interval = state.data_interval;
+        self.data_counter = state.data_counter;
+        self.data_f024 = state.data_f024;
+        self.data_control = state.data_control;
+        self.raise_required = state.raise_required;
+        self.instructions_since_divide = state.instructions_since_divide;
+        self.ticks_per_divide = state.ticks_per_divide;
+    }
+
     /// A stopped timer.
     pub fn new() -> Self {
         Self {
@@ -98,6 +145,15 @@ impl Timer {
     /// The divider period currently in use.
     pub fn ticks_per_divide(&self) -> u64 {
         self.ticks_per_divide
+    }
+
+    /// How far the divider has counted towards the next tick.
+    ///
+    /// This is the counter the hardware actually divides by, so a debugger
+    /// showing timer state needs it: `data_counter` only advances *after* a
+    /// divide, and watching it alone makes the divider look stalled.
+    pub fn instructions_since_divide(&self) -> u64 {
+        self.instructions_since_divide
     }
 
     /// `Timer::Reset`.

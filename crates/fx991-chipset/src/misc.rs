@@ -56,6 +56,21 @@ pub struct Misc {
     pub stop_acceptor_enabled: bool,
 }
 
+/// The DSR/standby/miscellaneous block's state, for snapshot and restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MiscState {
+    /// The single-byte "unknown" SFRs.
+    pub bytes: Vec<u8>,
+    /// The `0xF048..0xF050` block.
+    pub wide_f048: [u8; 8],
+    /// The `0xF220..0xF224` block.
+    pub wide_f220: [u8; 4],
+    /// Last value written to `0xF008`.
+    pub stpacp_last: u8,
+    /// Whether the `0x5_`-then-`0xA_` handshake has been seen.
+    pub stop_acceptor_enabled: bool,
+}
+
 impl Default for Misc {
     fn default() -> Self {
         Self::new()
@@ -63,6 +78,27 @@ impl Default for Misc {
 }
 
 impl Misc {
+    /// Everything needed to put this block back where it was.
+    pub fn snapshot(&self) -> MiscState {
+        MiscState {
+            bytes: self.bytes.to_vec(),
+            wide_f048: self.wide_f048,
+            wide_f220: self.wide_f220,
+            stpacp_last: self.stpacp_last,
+            stop_acceptor_enabled: self.stop_acceptor_enabled,
+        }
+    }
+
+    /// Restore a [`MiscState`].
+    pub fn restore(&mut self, state: &MiscState) {
+        let length = state.bytes.len().min(self.bytes.len());
+        self.bytes[..length].copy_from_slice(&state.bytes[..length]);
+        self.wide_f048 = state.wide_f048;
+        self.wide_f220 = state.wide_f220;
+        self.stpacp_last = state.stpacp_last;
+        self.stop_acceptor_enabled = state.stop_acceptor_enabled;
+    }
+
     /// Everything zeroed.
     pub fn new() -> Self {
         Self {

@@ -75,6 +75,12 @@ use timer::Timer;
 
 type Shared<T> = Rc<RefCell<T>>;
 
+/// The hook [`Chipset::tick`] calls before each instruction: physical PC, bus.
+///
+/// Returning `true` suppresses the instruction.  The bus is mutable so a caller
+/// can *inspect* memory before deciding (and, for a debugger, patch it).
+pub type PreExecute<'a> = &'a mut dyn FnMut(u32, &mut Bus) -> bool;
+
 /// The interrupt mask (`0xF010`) and pending (`0xF014`) registers.
 ///
 /// These are *not* a peripheral here: the chipset owns them directly.  Without
@@ -203,6 +209,40 @@ impl SfrDevice for Peripherals {
     }
 }
 
+/// The whole machine's state, for snapshot and restore.
+///
+/// The peripherals own state the bus cannot see: their [`SfrDevice`] adapters are
+/// routing shells pointing at `Rc<RefCell<..>>` handles, so restoring through the
+/// chipset is what restores them.  [`fx991_bus::BusSnapshot`] therefore covers the
+/// address space only, and this covers everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChipsetSnapshot {
+    /// The processor.
+    pub cpu: Cpu,
+    /// The address space.
+    pub bus: fx991_bus::BusSnapshot,
+    /// The interrupt controller.
+    pub interrupts: Interrupts,
+    /// The display.
+    pub screen: screen::ScreenState,
+    /// The key matrix.
+    pub keyboard: keyboard::KeyboardState,
+    /// The timer.
+    pub timer: timer::TimerState,
+    /// DSR and the unknown SFR block.
+    pub misc: misc::MiscState,
+    /// The `0xF000` shadow copied into the CPU before each instruction.
+    pub dsr: u8,
+    /// A standby request latched by a write, drained on the next tick.
+    pub standby: Option<StandbyRequest>,
+    /// Whether the machine has ever halted or stopped.
+    pub saw_stop: bool,
+    /// Software interrupts the CPU has executed.
+    pub raised_software: Vec<u32>,
+    /// `BRK` instructions executed.
+    pub breaks: u32,
+}
+
 /// The machine.
 pub struct Chipset {
     /// The data space.
@@ -298,6 +338,43 @@ impl Chipset {
         ]
     }
 
+    /// Everything needed to put the machine back where it was.
+    pub fn snapshot(&self) -> ChipsetSnapshot {
+        ChipsetSnapshot {
+            cpu: self.cpu.clone(),
+            bus: self.bus.snapshot(),
+            interrupts: self.interrupts.borrow().clone(),
+            screen: self.screen.borrow().snapshot(),
+            keyboard: self.keyboard.borrow().snapshot(),
+            timer: self.timer.borrow().snapshot(),
+            misc: self.misc.borrow().snapshot(),
+            dsr: self.dsr.get(),
+            standby: *self.standby.borrow(),
+            saw_stop: self.saw_stop,
+            raised_software: self.raised_software.clone(),
+            breaks: self.breaks,
+        }
+    }
+
+    /// Restore a [`ChipsetSnapshot`].
+    ///
+    /// `Bus::devices` is deliberately untouched: those entries are adapters onto
+    /// the same handles restored here, not state of their own.
+    pub fn restore(&mut self, snapshot: &ChipsetSnapshot) {
+        self.cpu = snapshot.cpu.clone();
+        self.bus.restore(&snapshot.bus);
+        *self.interrupts.borrow_mut() = snapshot.interrupts.clone();
+        self.screen.borrow_mut().restore(&snapshot.screen);
+        self.keyboard.borrow_mut().restore(&snapshot.keyboard);
+        self.timer.borrow_mut().restore(&snapshot.timer);
+        self.misc.borrow_mut().restore(&snapshot.misc);
+        self.dsr.set(snapshot.dsr);
+        *self.standby.borrow_mut() = snapshot.standby;
+        self.saw_stop = snapshot.saw_stop;
+        self.raised_software.clone_from(&snapshot.raised_software);
+        self.breaks = snapshot.breaks;
+    }
+
     /// `Chipset::Reset`.
     pub fn reset(&mut self) {
         self.screen.borrow_mut().reset();
@@ -315,14 +392,23 @@ impl Chipset {
 
     /// `Chipset::Tick`.
     ///
-    /// `pre_execute` is called with the physical PC the CPU is about to execute,
-    /// *after* interrupt dispatch and before the instruction fetch, and **even when
-    /// the machine is stopped** -- a ROM parked on a STOP instruction stays on that
-    /// address, and a watcher needs to see it repeat.  Returning `true` suppresses
-    /// the instruction, which is how a caller observes an address that exists only
-    /// between interrupt dispatch and the fetch (the reset vector at `0x946A` is the
-    /// case that matters).
-    pub fn tick(&mut self, mut pre_execute: Option<&mut dyn FnMut(u32) -> bool>) -> TickOutcome {
+    /// `pre_execute` is called with the physical PC the CPU is about to execute
+    /// and the bus, *after* interrupt dispatch and before the instruction fetch,
+    /// and **even when the machine is stopped** -- a ROM parked on a STOP
+    /// instruction stays on that address, and a watcher needs to see it repeat.
+    /// Returning `true` suppresses the instruction, which is how a caller observes
+    /// an address that exists only between interrupt dispatch and the fetch (the
+    /// reset vector at `0x946A` is the case that matters).
+    ///
+    /// The bus is passed so a caller can *decide* whether to stop using memory the
+    /// guest has not yet touched -- a conditional breakpoint on `[0xD180] == 0xFF`
+    /// has to read the data space before the instruction runs.  Re-running the
+    /// instruction to re-test a condition instead is not equivalent: a tick
+    /// advances the timer divider, so a second attempt would drift the machine.
+    /// A hook that writes through the bus is allowed (a debugger applying a patch
+    /// or a register poke does), but it is the caller's business to keep that
+    /// consistent with what the CPU is about to execute.
+    pub fn tick(&mut self, mut pre_execute: Option<PreExecute>) -> TickOutcome {
         // --- for peripheral in peripherals: peripheral.Tick ---------------
         self.screen.borrow_mut().tick();
         self.keyboard
@@ -355,7 +441,7 @@ impl Chipset {
 
         // --- if run_mode == RM_RUN: cpu.Next ------------------------------
         if let Some(hook) = pre_execute.as_mut() {
-            if hook(self.cpu.regs.physical_pc()) {
+            if hook(self.cpu.regs.physical_pc(), &mut self.bus) {
                 return TickOutcome::Suppressed;
             }
         }
@@ -606,7 +692,7 @@ mod tests {
         let mut machine = chipset();
         machine.reset();
         let mut seen = Vec::new();
-        let outcome = machine.tick(Some(&mut |pc| {
+        let outcome = machine.tick(Some(&mut |pc, _bus| {
             seen.push(pc);
             false
         }));
@@ -618,7 +704,7 @@ mod tests {
     fn a_hook_can_suppress_the_instruction() {
         let mut machine = chipset();
         machine.reset();
-        let outcome = machine.tick(Some(&mut |pc| pc == 0x0_946A));
+        let outcome = machine.tick(Some(&mut |pc, _bus| pc == 0x0_946A));
         assert_eq!(outcome, TickOutcome::Suppressed);
         assert_eq!(machine.cpu.regs.pc, 0x946A, "PC stayed at the entry");
         assert_eq!(machine.tick(None), TickOutcome::Executed("OP_BC"));
@@ -664,7 +750,7 @@ mod tests {
         machine.interrupts.borrow_mut().stop();
         let before = machine.cpu.regs.pc;
         let mut seen = Vec::new();
-        machine.tick(Some(&mut |pc| {
+        machine.tick(Some(&mut |pc, _bus| {
             seen.push(pc);
             false
         }));
@@ -705,5 +791,154 @@ mod tests {
         let mut machine = chipset();
         machine.poke(0xF033, 0x77);
         assert_eq!(machine.peek(0xF033), 0x77);
+    }
+
+    // ---------------------------------------------------------------- snapshots
+
+    /// Run a machine forward and fingerprint it the way `parity.rs` does, so a
+    /// snapshot can be judged on whether it reproduces *behaviour* and not just
+    /// equal fields.
+    fn fingerprint(machine: &Chipset) -> (u32, u16, u8, u64, u64) {
+        let ram = machine.bus.ram();
+        let mut hash: u64 = 0xCBF29CE484222325;
+        let mut sum: u64 = 0;
+        for (index, byte) in ram.iter().enumerate() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001B3);
+            sum = sum.wrapping_add((*byte as u64).wrapping_mul(index as u64 + 1));
+        }
+        (
+            machine.cpu.regs.physical_pc(),
+            machine.cpu.regs.sp,
+            machine.cpu.regs.psw(),
+            hash,
+            sum,
+        )
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_the_whole_machine() {
+        let mut machine = chipset();
+        machine.reset();
+        for _ in 0..40 {
+            machine.tick(None);
+        }
+        machine.poke(0x0_D180, 0x41);
+        machine.screen.borrow_mut().write(screen::CONTROL_MODE, 5);
+        machine.press_key(0x11);
+
+        let snapshot = machine.snapshot();
+        let before = fingerprint(&machine);
+
+        for _ in 0..60 {
+            machine.tick(None);
+        }
+        machine.poke(0x0_D180, 0x99);
+        assert_ne!(fingerprint(&machine), before, "the run changed something");
+
+        machine.restore(&snapshot);
+        assert_eq!(machine.snapshot(), snapshot, "the state came back exactly");
+        assert_eq!(fingerprint(&machine), before);
+    }
+
+    #[test]
+    fn restoring_a_snapshot_reproduces_the_subsequent_run() {
+        // The property that makes a rollback useful: what happens next must be
+        // what happened last time, to the byte.  A snapshot that missed the timer
+        // divider would drift here and nowhere else.
+        let mut machine = chipset();
+        machine.reset();
+        for _ in 0..30 {
+            machine.tick(None);
+        }
+        let snapshot = machine.snapshot();
+
+        for _ in 0..200 {
+            machine.tick(None);
+        }
+        let first = fingerprint(&machine);
+
+        machine.restore(&snapshot);
+        for _ in 0..200 {
+            machine.tick(None);
+        }
+        assert_eq!(fingerprint(&machine), first, "the replayed run diverges");
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_keyboard_holds_across_a_reset() {
+        // Holds survive a reset on purpose (the self-test combination depends on
+        // it), so a snapshot that dropped them would silently change which keys
+        // the ROM sees after a rollback.
+        let mut machine = chipset();
+        let code = machine
+            .keyboard
+            .borrow()
+            .code_for_name("7")
+            .expect("the model has a 7 key");
+        assert!(machine.press_key(code));
+        let snapshot = machine.snapshot();
+        assert!(machine.keyboard.borrow().is_pressed(code));
+
+        machine.keyboard.borrow_mut().release(None);
+        assert!(!machine.keyboard.borrow().is_pressed(code), "released");
+
+        machine.restore(&snapshot);
+        assert!(
+            machine.keyboard.borrow().is_pressed(code),
+            "the held key came back"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_carries_planted_code() {
+        let mut machine = chipset();
+        machine.bus.load_code(0x0_D100, &[0x8E, 0xF2]);
+        let snapshot = machine.snapshot();
+
+        machine.bus.clear_code(0x0_D100);
+        assert_eq!(machine.bus.read_code(0x0_D100), 0x0000, "the image shows");
+
+        machine.restore(&snapshot);
+        assert_eq!(
+            machine.bus.read_code(0x0_D100),
+            0xF28E,
+            "a patch is part of the state"
+        );
+    }
+
+    #[test]
+    fn the_timer_divider_is_part_of_a_snapshot() {
+        // `instructions_since_divide` decides which instruction the next timer
+        // interrupt lands on, so it has to travel with the rest.
+        let mut machine = chipset();
+        for _ in 0..50 {
+            machine.tick(None);
+        }
+        let progress = machine.timer.borrow().instructions_since_divide();
+        assert!(progress > 0, "the divider advanced");
+
+        let snapshot = machine.snapshot();
+        assert_eq!(snapshot.timer.instructions_since_divide, progress);
+
+        machine.timer.borrow_mut().tick(&mut Interrupts::new());
+        machine.restore(&snapshot);
+        assert_eq!(machine.timer.borrow().instructions_since_divide(), progress);
+    }
+
+    #[test]
+    fn a_hook_can_read_the_bus_before_the_instruction_runs() {
+        // The reason the hook takes the bus: a conditional breakpoint on a memory
+        // value has to see the state the instruction is about to act on.
+        let mut machine = chipset();
+        machine.reset();
+        machine.poke(0x0_D180, 0xAB);
+
+        let mut seen = None;
+        machine.tick(Some(&mut |_pc, bus| {
+            seen = Some(bus.peek_quiet(0x0_D180));
+            false
+        }));
+        assert_eq!(seen, Some(0xAB));
     }
 }

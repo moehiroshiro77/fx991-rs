@@ -62,7 +62,7 @@ fn boot_lands_on_the_reset_entry_and_then_past_its_trampoline() {
     machine.reset();
 
     let mut entry_seen = None;
-    machine.tick(Some(&mut |pc| {
+    machine.tick(Some(&mut |pc, _bus| {
         entry_seen = Some(pc);
         false
     }));
@@ -320,6 +320,74 @@ fn the_ram_can_be_snapshotted_and_restored() {
     let mut restored = fx991::Emu::from_rom(rom_or_skip!());
     restored.set_ram(&snapshot);
     assert_eq!(restored.ram(), snapshot.as_slice());
+}
+
+#[test]
+fn a_full_snapshot_round_trips_and_replays_the_rom() {
+    // The property a debugger's rollback rests on: restoring must put the machine
+    // back somewhere it *behaves* identically, not merely somewhere that compares
+    // equal.  A snapshot missing the timer divider would drift only here.
+    let mut emu = fx991::Emu::from_rom(rom_or_skip!());
+    emu.run(300_000);
+    let snapshot = emu.snapshot();
+
+    emu.run(50_000);
+    let after_first = state_fingerprint(&emu);
+    assert_ne!(after_first, fingerprint_of(&snapshot));
+
+    emu.restore(&snapshot);
+    assert_eq!(emu.snapshot(), snapshot, "the state came back exactly");
+    emu.run(50_000);
+    assert_eq!(
+        state_fingerprint(&emu),
+        after_first,
+        "the replayed run diverges"
+    );
+}
+
+/// The RAM-and-registers fingerprint the parity tests use, so a snapshot is
+/// judged on observable behaviour rather than on equal fields.
+fn state_fingerprint(emu: &fx991::Emu) -> (u32, u16, u8, u64, u64) {
+    let mut hash: u64 = 0xCBF29CE484222325;
+    let mut sum: u64 = 0;
+    for (index, byte) in emu.ram().iter().enumerate() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001B3);
+        sum = sum.wrapping_add((*byte as u64).wrapping_mul(index as u64 + 1));
+    }
+    (emu.pc(), emu.sp(), emu.psw(), hash, sum)
+}
+
+fn fingerprint_of(snapshot: &fx991::EmuSnapshot) -> (u32, u16, u8, u64, u64) {
+    let mut hash: u64 = 0xCBF29CE484222325;
+    let mut sum: u64 = 0;
+    for (index, byte) in snapshot.chipset.bus.ram.iter().enumerate() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001B3);
+        sum = sum.wrapping_add((*byte as u64).wrapping_mul(index as u64 + 1));
+    }
+    let regs = &snapshot.chipset.cpu.regs;
+    (regs.physical_pc(), regs.sp, regs.psw(), hash, sum)
+}
+
+#[test]
+fn a_quiet_read_does_not_disturb_the_machine() {
+    // Scrolling a memory view must not look like the guest reading memory, or the
+    // fault counters the fault-reporting tests assert on would move under them.
+    let mut emu = fx991::Emu::from_rom(rom_or_skip!());
+    emu.run(10_000);
+    let faults_before = emu.chipset.bus.fault_count;
+
+    // 0x6_0000 is unmapped, so an ordinary read records a fault.
+    let quiet = emu.peek_quiet(0x6_0000);
+    assert_eq!(quiet, 0);
+    assert_eq!(
+        emu.chipset.bus.fault_count, faults_before,
+        "a debugger's read is not a guest fault"
+    );
+
+    emu.peek(0x6_0000);
+    assert_eq!(emu.chipset.bus.fault_count, faults_before + 1);
 }
 
 // ----------------------------------------------------- instruction semantics
@@ -821,14 +889,40 @@ fn the_power_key_resets_the_machine() {
 }
 
 #[test]
-fn shift_plus_log_gives_the_ten_to_the_x_prefix() {
+fn shift_plus_the_two_argument_log_key_gives_the_ten_to_the_x_prefix() {
     let mut calculator = Calculator::from_rom(rom_or_skip!()).expect("boot");
     tap_and_settle(&mut calculator, "SHIFT");
-    tap_and_settle(&mut calculator, "log(");
+    tap_and_settle(&mut calculator, "log(a,b)");
     assert_eq!(
         input_bytes(&mut calculator, 4),
         vec![0x73, 0x1A, 0x19, 0x1B]
     );
+}
+
+#[test]
+fn a_key_string_types_a_multi_box_template_only_partly_and_that_is_the_caller_s_problem() {
+    // `log(a,b)` is the *two-argument* key: its template is `7D 1A 19 1C 19 1B`, so
+    // `press("log(a,b)4")` leaves the second box empty and the ROM evaluates an
+    // undefined value.  Pinning it here because the failure is silent -- the answer
+    // is simply `0`, not a syntax error.
+    let mut calculator = Calculator::from_rom(rom_or_skip!()).expect("boot");
+    tap_and_settle(&mut calculator, "log(a,b)");
+    tap_and_settle(&mut calculator, "4");
+    let bytes = input_bytes(&mut calculator, 8);
+    assert_eq!(bytes[0], 0x7D, "the log token");
+    assert_eq!(bytes[1], 0x1A, "box 1 opens");
+    assert_eq!(bytes[3], 0x1C, "the two-argument separator");
+    assert_eq!(bytes[4], 0x19, "box 2 is empty");
+}
+
+#[test]
+fn the_single_argument_log_is_shift_plus_the_negate_key() {
+    // `log` with one argument is SHIFT + `(-)`, and it writes a bare `7D` -- no
+    // template, no boxes.  This is the key a person means when they say `lg`.
+    let mut calculator = Calculator::from_rom(rom_or_skip!()).expect("boot");
+    tap_and_settle(&mut calculator, "SHIFT");
+    tap_and_settle(&mut calculator, "(-)");
+    assert_eq!(input_bytes(&mut calculator, 2), vec![0x7D, 0x00]);
 }
 
 #[test]

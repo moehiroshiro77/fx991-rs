@@ -51,10 +51,11 @@ use layout::{
     SKIN_W,
 };
 
-/// The decoded `interface.png`, as raw RGBA.
+/// The decoded face texture, as raw RGBA.
 ///
-/// Produced by; regenerate with that script rather than
-/// editing the blob.  The full 307x615 image is kept because the indicator
+/// The file is a bare pixel buffer: row-major RGBA with no header.  It is read
+/// from disk at startup rather than compiled in, so no copyrighted image is
+/// carried by the binary.  The full 307x615 image is kept because the indicator
 /// atlas lives *below* the visible crop -- cropping
 /// to the body first would make every indicator sample transparent pixels.
 #[derive(Clone)]

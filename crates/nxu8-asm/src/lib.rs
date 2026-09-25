@@ -9,14 +9,14 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
 // Public License in LICENSE for more details.
 
-//! Table-driven nX-U8 encoder.
+//! Table-driven nX-U8 encoder and disassembler.
 //!
-//! Every helper here is *derived from the decode table's own operand masks* rather
+//! Both halves are *derived from the decode table's own operand masks* rather
 //! than from a second reading of the encoding chart: `encode` starts from a table
 //! row's base opcode and OR-s each slot's value in at the mask/shift the row
-//! declares.  A helper therefore cannot disagree with the decoder about where a
-//! field lives, and a wrong slot index fails loudly instead of producing a
-//! plausible-looking instruction.
+//! declares, and [`disasm`] recovers the row from the word it read.  Neither can
+//! disagree with the decoder about where a field lives, and a wrong slot index
+//! fails loudly instead of producing a plausible-looking instruction.
 //!
 //! Which slot a field occupies is not uniform -- `PUSH Rn` keeps its register in
 //! operand 1 while `POP Rn` keeps it in operand 0, and `MOV PSW,#imm` puts the
@@ -31,6 +31,8 @@
 //! `
 
 #![warn(missing_docs)]
+
+pub mod disasm;
 
 use nxu8_core::decode::{dispatch, H_TI};
 
