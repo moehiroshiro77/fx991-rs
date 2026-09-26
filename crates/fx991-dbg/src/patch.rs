@@ -212,16 +212,6 @@ impl Patcher {
         })
     }
 
-    /// Assemble one instruction and plant it.
-    pub fn assemble(
-        bus: &mut Bus,
-        address: u32,
-        bytes: Vec<u8>,
-        source: impl Into<String>,
-    ) -> Result<Patch, PatchError> {
-        Self::apply(bus, address, &bytes, source)
-    }
-
     /// Remove the patch at `address`.  Returns whether there was one.
     pub fn undo(bus: &mut Bus, address: u32) -> bool {
         bus.clear_code(address)
@@ -245,14 +235,14 @@ fn original_bytes(bus: &Bus, address: u32, length: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(length);
     for offset in 0..length as u32 {
         let at = address.wrapping_add(offset);
-        let byte = bus.rom().byte(rom_offset(bus, at)).unwrap_or(0);
+        let byte = bus.rom().byte(rom_offset(at)).unwrap_or(0);
         out.push(byte);
     }
     out
 }
 
 /// Where a data-space address lands in the ROM image, for the windows that map it.
-fn rom_offset(bus: &Bus, address: u32) -> u32 {
+fn rom_offset(address: u32) -> u32 {
     for window in fx991_bus::CLASSWIZ_ROM_WINDOWS {
         if address >= window.base && address < window.base + window.size {
             return window.rom_base + (address - window.base);
@@ -262,7 +252,6 @@ fn rom_offset(bus: &Bus, address: u32) -> u32 {
     if address < 0x1_0000 {
         return address;
     }
-    let _ = bus;
     address
 }
 
@@ -696,7 +685,7 @@ mod tests {
     fn a_patch_applied_through_the_assembler_is_fetchable() {
         let mut bus = bus();
         let bytes = assemble_instruction("POP PC").unwrap();
-        let patch = Patcher::assemble(&mut bus, 0x1_0002, bytes, "POP PC").unwrap();
+        let patch = Patcher::apply(&mut bus, 0x1_0002, &bytes, "POP PC").unwrap();
         assert_eq!(patch.bytes, vec![0x8E, 0xF2]);
         assert_eq!(bus.read_code(0x1_0002), 0xF28E);
         assert_eq!(patch.original, vec![0x8E, 0xF2], "that is what the ROM had");

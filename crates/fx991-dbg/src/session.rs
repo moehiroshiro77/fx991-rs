@@ -129,15 +129,6 @@ impl StopReason {
     }
 }
 
-/// How a temporary breakpoint for `step_over`/`step_out` ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Temporary {
-    /// Stop at the return address of a call.
-    Return,
-    /// Stop when the call frame returns to the caller.
-    StepOut,
-}
-
 /// The debugger's own state: what to stop on, and the bookkeeping that goes with
 /// it.  The machine lives in the [`Emu`] the caller passes in, so one debugger can
 /// drive a machine that was reloaded.
@@ -155,8 +146,11 @@ pub struct Debugger {
     /// bus's overlay list; see [`crate::patch`].
     patches: Vec<Patch>,
     trace: Option<TraceRing>,
-    /// A pending temporary breakpoint, used by `step_over` and `step_out`.
-    temporary: Option<(Temporary, u32)>,
+    /// A pending temporary breakpoint, used by `step_over`, `step_out` and
+    /// `run_to`.  All three want the same thing -- stop when the PC reaches this
+    /// address -- and the caller reads [`Debugger::stepped`] to tell that apart from
+    /// a user breakpoint, so the reason it was set does not need recording.
+    temporary: Option<u32>,
     /// Set when a temporary breakpoint fires, so the caller can tell a step
     /// completion from a user breakpoint.
     stepped: bool,
@@ -487,7 +481,7 @@ impl Debugger {
         self.tick(emu);
         let return_address =
             ((emu.chipset.cpu.regs.lcsr() as u32) << 16) | emu.chipset.cpu.regs.lr() as u32;
-        self.temporary = Some((Temporary::Return, return_address));
+        self.temporary = Some(return_address);
         self.run(emu, budget)
     }
 
@@ -497,13 +491,13 @@ impl Debugger {
     pub fn step_out(&mut self, emu: &mut Emu, budget: u64) -> StopReason {
         let return_address =
             ((emu.chipset.cpu.regs.lcsr() as u32) << 16) | emu.chipset.cpu.regs.lr() as u32;
-        self.temporary = Some((Temporary::StepOut, return_address));
+        self.temporary = Some(return_address);
         self.run(emu, budget)
     }
 
     /// Run until the PC reaches an address, or the budget is spent.
     pub fn run_to(&mut self, emu: &mut Emu, address: u32, budget: u64) -> StopReason {
-        self.temporary = Some((Temporary::Return, address));
+        self.temporary = Some(address);
         self.run(emu, budget)
     }
 
@@ -665,8 +659,7 @@ impl Debugger {
 
     /// Whether a pending temporary breakpoint is at `pc`.
     fn temporary_at(&mut self, pc: u32) -> Option<StopReason> {
-        let (_, address) = self.temporary?;
-        if address != pc {
+        if self.temporary? != pc {
             return None;
         }
         self.temporary = None;

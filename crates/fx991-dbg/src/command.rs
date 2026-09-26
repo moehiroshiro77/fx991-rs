@@ -96,16 +96,6 @@ impl std::error::Error for CommandError {}
 
 type Result<T> = std::result::Result<T, CommandError>;
 
-/// How a `run`-family command writes `StopReason`, and whether it prints anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Report {
-    /// Print where it stopped.
-    Stop,
-    /// Print nothing on a normal stop, for a script that only cares about the next
-    /// command's assertions.
-    Quiet,
-}
-
 /// The default tick budget for a run, matching `emu run`'s.
 ///
 /// A budget is not optional in spirit: the ROM parks in STOP for most of its life,
@@ -127,9 +117,6 @@ pub const DEFAULT_ACCEPT_TICKS: u64 = 4_000_000;
 /// command looks at it.
 pub const DEFAULT_SETTLE_TICKS: u64 = 120_000;
 
-/// Kept for the places that only need a short run, so the intent reads clearly.
-pub const DEFAULT_TAP_TICKS: u64 = DEFAULT_SETTLE_TICKS;
-
 /// The most bytes one command will read, write or render at once.
 ///
 /// A length typed at a prompt is otherwise unbounded: `m D180 4294967295` would
@@ -144,8 +131,6 @@ pub struct Session<'a> {
     pub emu: &'a mut Emu,
     /// The debugger's own state.
     pub debugger: &'a mut Debugger,
-    /// Whether output is being produced for a person or a script.
-    pub quiet: bool,
 }
 
 impl Session<'_> {
@@ -185,12 +170,12 @@ impl Session<'_> {
                     .optional_number(&words, 0, "g")?
                     .unwrap_or(DEFAULT_BUDGET);
                 let reason = self.debugger.run(self.emu, budget);
-                Ok(CommandResult::Output(self.stop_text(&reason, Report::Stop)))
+                Ok(CommandResult::Output(self.stop_text(&reason)))
             }
             "r" | "run_to" => {
                 let address = self.address(&words, 0, "run to an address")?;
                 let reason = self.debugger.run_to(self.emu, address, DEFAULT_BUDGET);
-                Ok(CommandResult::Output(self.stop_text(&reason, Report::Stop)))
+                Ok(CommandResult::Output(self.stop_text(&reason)))
             }
             "t" | "ticks" => {
                 let count = self.required_number(&words, 0, "t wants a tick count")?;
@@ -748,19 +733,13 @@ impl Session<'_> {
         }
     }
 
-    fn stop_text(&self, reason: &StopReason, report: Report) -> String {
+    fn stop_text(&self, reason: &StopReason) -> String {
         match reason {
             StopReason::Breakpoint { .. } | StopReason::Watch { .. } => {
                 format!("stopped: {}\n{}", reason.text(), view::registers(self.emu))
             }
             StopReason::Stopped => format!("stopped: {}\n", reason.text()),
-            StopReason::Budget { .. } => {
-                if report == Report::Quiet {
-                    String::new()
-                } else {
-                    format!("{}\n", reason.text())
-                }
-            }
+            StopReason::Budget { .. } => format!("{}\n", reason.text()),
             StopReason::Paused => String::new(),
         }
     }
@@ -1219,11 +1198,7 @@ mod tests {
 
     /// Run one command against a fresh session, returning the output.
     fn run(emu: &mut Emu, debugger: &mut Debugger, line: &str) -> Result<String> {
-        let mut session = Session {
-            emu,
-            debugger,
-            quiet: false,
-        };
+        let mut session = Session { emu, debugger };
         match session.execute(line)? {
             CommandResult::Output(text) => Ok(text),
             CommandResult::Silent => Ok(String::new()),

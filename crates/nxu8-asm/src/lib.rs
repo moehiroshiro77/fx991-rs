@@ -559,13 +559,6 @@ pub mod asm {
     pub fn bc_to(pc: u16, target: u16, condition: u8) -> Vec<u8> {
         bc(condition, bc_displacement(pc, target))
     }
-
-    // The alias is part of the public story even though no helper needs the type
-    // name directly.
-    #[allow(dead_code)]
-    fn _slot_alias(slot: Slot) -> Slot {
-        slot
-    }
 }
 
 #[cfg(test)]

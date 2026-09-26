@@ -39,13 +39,6 @@ pub const INPUT_FILTER: u32 = 0x0_F042;
 pub const KO_MASK: u32 = 0x0_F044;
 /// `0xF046`, 16-bit but only 10 bits are used
 pub const KO: u32 = 0x0_F046;
-/// `0xF050`, only registered when `real_hardware == 0`
-pub const PD_VALUE: u32 = 0x0_F050;
-
-/// `0xF048`, an 8-byte "unknown" block from.
-pub const MISC_F048: u32 = 0x0_F048;
-/// `0xF220`, a 4-byte "unknown" block from.
-pub const MISC_F220: u32 = 0x0_F220;
 
 /// The bit a matrix line is selected by.
 ///
@@ -435,7 +428,6 @@ impl Keyboard {
     /// `RecalculateKI`.
     ///
     /// Bit positions are the KO/KI line numbers, so the loop indexes by bit.
-    #[allow(clippy::needless_range_loop)]
     pub fn recalculate_ki(&mut self) {
         let mut ghosted = 0u8;
         for ix in 0..7 {

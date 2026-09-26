@@ -335,16 +335,6 @@ impl Chipset {
         }
     }
 
-    /// The order peripherals are ticked in, for documentation and tests.
-    pub fn tick_order() -> [Peripheral; 4] {
-        [
-            Peripheral::Screen,
-            Peripheral::Keyboard,
-            Peripheral::Misc,
-            Peripheral::Timer,
-        ]
-    }
-
     /// Everything needed to put the machine back where it was.
     pub fn snapshot(&self) -> ChipsetSnapshot {
         ChipsetSnapshot {

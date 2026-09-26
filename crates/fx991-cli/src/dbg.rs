@@ -90,21 +90,13 @@ fn print_banner(emu: &mut Emu) {
 fn run_script(emu: &mut Emu, debugger: &mut Debugger, path: &str) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))?;
-    let mut session = Session {
-        emu,
-        debugger,
-        quiet: false,
-    };
+    let mut session = Session { emu, debugger };
     execute_lines(&mut session, text.lines(), Some(path), false)
 }
 
 fn run_stdin(emu: &mut Emu, debugger: &mut Debugger, interactive: bool) -> Result<(), String> {
     let stdin = std::io::stdin();
-    let mut session = Session {
-        emu,
-        debugger,
-        quiet: !interactive,
-    };
+    let mut session = Session { emu, debugger };
 
     // A terminal gets a prompt per line; a pipe gets none, so the output stays
     // parseable.
