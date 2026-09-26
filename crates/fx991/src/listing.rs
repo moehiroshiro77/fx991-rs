@@ -116,7 +116,10 @@ fn parse_line(line: &str) -> Option<Entry> {
     if line.len() < 9 {
         return None;
     }
-    let (address_part, rest) = line.split_at(6);
+    // `split_at` panics when the index is inside a multi-byte character, and this
+    // reads a user-supplied file, so a stray non-ASCII byte must skip the line
+    // rather than abort the parse.  `split_at_checked` is the fallible form.
+    let (address_part, rest) = line.split_at_checked(6)?;
     let address = u32::from_str_radix(address_part, 16).ok()?;
 
     // The byte field ends at the first run of two or more spaces; its own bytes are
@@ -188,6 +191,23 @@ mod tests {
             "the 4-byte B must advance by four: {text}"
         );
         assert!(text.contains("000006"), "{text}");
+    }
+
+    #[test]
+    fn a_line_whose_address_field_is_not_ascii_is_skipped() {
+        // The address field ends at byte 6, and this reads a user-supplied file, so
+        // a multi-byte character straddling that boundary must skip the line rather
+        // than abort the whole parse.  `e` with an acute accent is two bytes, so it
+        // starts at 5 and byte 6 is inside it.
+        let text = "00000\u{e9}  00 00  MOV R0, #0\n000000   00 F0 6A 94        B       00h:0946Ah\n";
+        assert!(
+            !text.is_char_boundary(6),
+            "the sample must split a character, or it proves nothing"
+        );
+        let listing = Listing::parse(text);
+        // The bad line is dropped and the good one still parses.
+        assert_eq!(listing.entries().len(), 1);
+        assert_eq!(listing.at(0x000000).unwrap().bytes, vec![0x00, 0xF0, 0x6A, 0x94]);
     }
 
     #[test]
