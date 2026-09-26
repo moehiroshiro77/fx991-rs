@@ -580,7 +580,10 @@ impl Bus {
 
     fn read_data_inner(&mut self, address: u32) -> u8 {
         let value = self.read_data_plain(address);
-        if !self.quiet {
+        // Classifying walks the ROM-window and overlay lists, and `note_access`
+        // discards the result outright when no watch is armed.  Asking first keeps
+        // that walk off the ordinary path, which is every data read the guest makes.
+        if !self.quiet && self.watches.iter().any(|watch| watch.read) {
             let kind = self.classify_data_read(address);
             self.note_access(kind, address, value);
         }
@@ -634,7 +637,9 @@ impl Bus {
     }
 
     fn write_data_inner(&mut self, address: u32, value: u8) {
-        if !self.quiet {
+        // Same guard as the read side: the classification only matters when a watch
+        // can use it.
+        if !self.quiet && self.watches.iter().any(|watch| watch.write) {
             let kind = self.classify_data_write(address);
             self.note_access(kind, address, value);
         }
@@ -919,6 +924,31 @@ mod tests {
     }
 
     // ------------------------------------------------------------------ watches
+
+    #[test]
+    fn the_classification_guard_does_not_hide_a_watch() {
+        // The read/write paths skip the SFR-versus-RAM classification when no watch
+        // is armed, so this pins that an armed one still gets the right direction --
+        // including the `SfrRead`/`SfrWrite` kinds, which only the classification
+        // can produce.
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_F042));
+        use nxu8_core::Memory;
+        bus.write_data(0x0_F042, 0x41);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1, "an SFR write is still reported");
+        assert_eq!(hits[0].kind, Access::SfrWrite);
+
+        bus.read_data(0x0_F042);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1, "and an SFR read");
+        assert_eq!(hits[0].kind, Access::SfrRead);
+
+        // An ordinary RAM address keeps the plain directions.
+        bus.watch(Watch::data(0x0_D180));
+        bus.write_data(0x0_D180, 9);
+        assert_eq!(bus.take_watch_hits()[0].kind, Access::Write);
+    }
 
     #[test]
     fn a_watch_reports_the_value_and_direction_of_the_access() {

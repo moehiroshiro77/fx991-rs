@@ -615,9 +615,14 @@ impl Debugger {
                 continue;
             }
             let hits = breakpoint.hits;
-            let matches_condition = match breakpoint.condition.clone() {
+            // Borrowed, not cloned: `Expr` is a boxed tree, so a clone here would
+            // walk and re-allocate it on every arrival at every conditional
+            // breakpoint.  The breakpoint list is already out of `self`, and
+            // `evaluate` takes the machine separately, so the two borrows are
+            // disjoint.
+            let matches_condition = match &breakpoint.condition {
                 None => true,
-                Some(condition) => self.evaluate(&condition, emu, hits),
+                Some(condition) => self.evaluate(condition, emu, hits),
             };
             breakpoint.hits += 1;
             if !matches_condition {
@@ -700,9 +705,10 @@ impl Debugger {
                     continue;
                 }
                 let count = watch.hits;
-                let condition_holds = match watch.condition.clone() {
+                // Borrowed for the same reason as the breakpoint condition above.
+                let condition_holds = match &watch.condition {
                     None => true,
-                    Some(condition) => self.evaluate(&condition, emu, count),
+                    Some(condition) => self.evaluate(condition, emu, count),
                 };
                 watch.hits += 1;
                 if !condition_holds {
