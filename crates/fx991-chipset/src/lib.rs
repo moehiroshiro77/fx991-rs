@@ -460,9 +460,14 @@ impl Chipset {
         // A write to `0xF000` is visible to the instruction that follows it.
         self.cpu.regs.dsr = self.dsr.get();
 
+        // Read before the step: `Break` judges the nesting from the level the
+        // instruction was reached at, not the one it leaves behind.
+        let exception_level = self.cpu.exception_level();
         let mut sink = ChipsetSink {
             software: &mut self.raised_software,
             breaks: &mut self.breaks,
+            interrupts: &self.interrupts,
+            exception_level,
         };
         match self.cpu.step(&mut self.bus, &mut sink) {
             Some(handler) => TickOutcome::Executed(handler),
@@ -638,18 +643,40 @@ pub enum TickOutcome {
     Suppressed,
 }
 
+/// What a `SWI` or `BRK` instruction does to the machine.
+///
+/// Both are *interrupts*, not calls: the CPU only records that the instruction
+/// ran, and the controller then has to actually raise the source, because the
+/// vector is taken by the ordinary accept path like every other interrupt.  The
+/// controller is reached through a shared handle, since the CPU holds the sink
+/// while it executes and the chipset owns the controller.
 struct ChipsetSink<'a> {
     software: &'a mut Vec<u32>,
     breaks: &'a mut u32,
+    interrupts: &'a RefCell<Interrupts>,
+    /// The exception level the `BRK` is taken at, read before the instruction ran.
+    ///
+    /// `Break` decides from it whether the nesting is already too deep and the
+    /// machine must reset, so it has to be the level *before* this instruction --
+    /// the same reason `AcceptInterrupt` captures `old_level` up front.
+    exception_level: usize,
 }
 
 impl ControlSink for ChipsetSink<'_> {
     fn raise_software(&mut self, index: u32) {
         self.software.push(index);
+        // `SWI #n` becomes index `n + 0x40`; the controller ignores an index past
+        // the table.
+        self.interrupts.borrow_mut().raise_software(index);
     }
 
     fn break_(&mut self) {
         *self.breaks += 1;
+        // `true` means the nesting was already too deep and a full reset is owed.
+        // Raising the source is a separate step, and the reset needs the whole
+        // chipset rather than the controller, so it is recorded and left to the
+        // caller -- the recorder is there for exactly that.
+        let _needs_reset = self.interrupts.borrow_mut().break_(self.exception_level);
     }
 }
 
@@ -692,6 +719,72 @@ mod tests {
         // The reset vector's `BC AL` has already executed within this tick.
         assert_eq!(outcome, TickOutcome::Executed("OP_BC"));
         assert_eq!(machine.cpu.regs.pc, 0x946E);
+    }
+
+    /// A machine whose ROM holds `program` at the reset entry, with the reset
+    /// request already consumed.
+    ///
+    /// The consuming tick also executes the *first* instruction of `program`,
+    /// because the accept pass runs before the step.  A test that wants to observe
+    /// the state after instruction *n* therefore ticks `n` more times.
+    ///
+    /// The instructions are written as bytes rather than assembled: this crate does
+    /// not depend on the encoder, and the encodings here are the ones the ROM
+    /// listing shows (`EI` is `08 ED`, `SWI #0` is `00 E5`, `BRK` is `FF FF`).
+    fn machine_running(program: &[u8]) -> Chipset {
+        let mut data = vec![0u8; 0x4_0000];
+        data[0x0000] = 0x00;
+        data[0x0001] = 0xF0; // SP = 0xF000
+        data[0x0002] = 0x6A;
+        data[0x0003] = 0x94; // reset entry 0x946A
+        data[0x0_946A..0x0_946A + program.len()].copy_from_slice(program);
+        let mut machine = Chipset::new(Bus::new(Rom::new(data)));
+        machine.reset();
+        machine.tick(None); // consumes the reset and runs the first instruction
+        machine
+    }
+
+    #[test]
+    fn a_software_interrupt_raises_its_source() {
+        // `SWI #n` is an interrupt, not a call: the controller has to be told, or
+        // the instruction runs and no vector is ever taken.
+        let mut machine = machine_running(&[0x08, 0xED, 0x00, 0xE5]); // EI, SWI #0
+
+        assert_eq!(
+            machine.interrupts.borrow().select(0),
+            None,
+            "the EI ran, and nothing is pending yet"
+        );
+
+        machine.tick(None); // the SWI; the accept pass has already happened
+
+        assert_eq!(
+            machine.raised_software(),
+            &[0],
+            "the instruction is recorded"
+        );
+        assert_eq!(
+            machine.interrupts.borrow().select(0),
+            Some(interrupts::INT_SOFTWARE),
+            "and the source is armed for the next accept pass"
+        );
+    }
+
+    #[test]
+    fn a_break_raises_the_break_source() {
+        let mut machine = machine_running(&[0x08, 0xED, 0xFF, 0xFF]); // EI, BRK
+
+        assert_eq!(machine.breaks(), 0, "the BRK has not run yet");
+        assert_eq!(machine.interrupts.borrow().select(0), None);
+
+        machine.tick(None); // the BRK
+
+        assert_eq!(machine.breaks(), 1, "the instruction is recorded");
+        assert_eq!(
+            machine.interrupts.borrow().select(0),
+            Some(interrupts::INT_BREAK),
+            "and the source is armed for the next accept pass"
+        );
     }
 
     #[test]
