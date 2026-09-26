@@ -144,76 +144,21 @@ impl Session<'_> {
         let words: Vec<&str> = rest.split_whitespace().collect();
 
         match verb {
-            // ------------------------------------------------------------ stepping
-            "s" | "step" => {
-                let count = self.optional_number(&words, 0, "step")?.unwrap_or(1);
-                for _ in 0..count {
-                    let reason = self.debugger.step(self.emu);
-                    self.report_step(&reason)?;
-                }
-                Ok(CommandResult::Output(view::summary(self.emu)))
-            }
-            "n" | "next" | "over" => {
-                let reason = self.debugger.step_over(self.emu, DEFAULT_BUDGET);
-                self.report_step(&reason)?;
-                Ok(CommandResult::Output(view::summary(self.emu)))
-            }
-            "out" | "finish" => {
-                let reason = self.debugger.step_out(self.emu, DEFAULT_BUDGET);
-                self.report_step(&reason)?;
-                Ok(CommandResult::Output(view::summary(self.emu)))
-            }
-            "g" | "continue" | "c" => {
-                // An optional budget, because the ROM parks in STOP for most of its
-                // life and a run that has to wait out a sleep needs a bigger one.
-                let budget = self
-                    .optional_number(&words, 0, "g")?
-                    .unwrap_or(DEFAULT_BUDGET);
-                let reason = self.debugger.run(self.emu, budget);
-                Ok(CommandResult::Output(self.stop_text(&reason)))
-            }
-            "r" | "run_to" => {
-                let address = self.address(&words, 0, "run to an address")?;
-                let reason = self.debugger.run_to(self.emu, address, DEFAULT_BUDGET);
-                Ok(CommandResult::Output(self.stop_text(&reason)))
-            }
-            "t" | "ticks" => {
-                let count = self.required_number(&words, 0, "t wants a tick count")?;
-                self.debugger.run_uninterrupted(self.emu, count);
-                Ok(CommandResult::Output(view::summary(self.emu)))
-            }
-            "runmode" => {
-                // The one command that does something about STOP, which a stepper
-                // otherwise cannot leave.
-                if words.first() != Some(&"run") {
-                    return Err(CommandError::new("runmode wants `run`"));
-                }
-                self.debugger.force_run(self.emu);
-                Ok(CommandResult::Output("running\n".to_string()))
-            }
+            "s" | "step" => self.step(&words),
+            "n" | "next" | "over" => self.step_over(),
+            "out" | "finish" => self.step_out(),
+            "g" | "continue" | "c" => self.go(&words),
+            "r" | "run_to" => self.run_to_address(&words),
+            "t" | "ticks" => self.ticks(&words),
+            "runmode" => self.force_run(&words),
 
-            // --------------------------------------------------------- breakpoints
             "bp" => self.breakpoint(&words),
             "bl" | "bps" => Ok(CommandResult::Output(view::state(self.debugger, self.emu))),
             "bc" => {
                 self.debugger.clear_breakpoints();
                 Ok(CommandResult::Output("breakpoints cleared\n".to_string()))
             }
-            "be" | "bd" => {
-                let id = self.breakpoint_id(&words, "be wants a breakpoint number")?;
-                let enable = verb == "be";
-                match self.debugger.breakpoint_mut(id) {
-                    Some(breakpoint) => {
-                        breakpoint.enabled = enable;
-                        Ok(CommandResult::Output(format!(
-                            "breakpoint {} {}\n",
-                            id.0,
-                            if enable { "enabled" } else { "disabled" }
-                        )))
-                    }
-                    None => Err(CommandError::new(format!("no breakpoint {}", id.0))),
-                }
-            }
+            "be" | "bd" => self.set_breakpoint_enabled(&words, verb == "be"),
 
             // -------------------------------------------------------------- watches
             "wp" | "watch" => self.watch(&words),
@@ -223,91 +168,16 @@ impl Session<'_> {
                 Ok(CommandResult::Output("watches cleared\n".to_string()))
             }
 
-            // ------------------------------------------------------------ registers
             "regs" | "reg" => Ok(CommandResult::Output(view::registers(self.emu))),
-            "get" => {
-                let name = words
-                    .first()
-                    .ok_or_else(|| CommandError::new("get wants a register name"))?;
-                let value = self.register_value(name)?;
-                Ok(CommandResult::Output(format!("{name} = {value:04X}h\n")))
-            }
-            "set" => {
-                let name = *words
-                    .first()
-                    .ok_or_else(|| CommandError::new("set wants a register name"))?;
-                let text = *words
-                    .get(1)
-                    .ok_or_else(|| CommandError::new("set wants a value"))?;
-                let value = parse_number(text)
-                    .ok_or_else(|| CommandError::new(format!("cannot read {text:?}")))?;
-                self.set_register(name, value as u64)?;
-                Ok(CommandResult::Output(view::registers(self.emu)))
-            }
-            "sp" => {
-                let text = *words
-                    .first()
-                    .ok_or_else(|| CommandError::new("sp wants a value"))?;
-                let value = parse_number(text)
-                    .ok_or_else(|| CommandError::new(format!("cannot read {text:?}")))?;
-                self.emu.set_sp(value as u16);
-                Ok(CommandResult::Output(view::registers(self.emu)))
-            }
+            "get" => self.get_register(&words),
+            "set" => self.set_register_command(&words),
+            "sp" => self.set_stack_pointer(&words),
 
-            // --------------------------------------------------------------- memory
-            "m" | "mem" | "dump" => {
-                let address = self.address(&words, 0, "m wants an address")?;
-                let length = match words.get(1) {
-                    Some(_) => self.bounded_length(&words, 1, "m")?,
-                    None => 0x40,
-                };
-                Ok(CommandResult::Output(view::memory(
-                    self.emu, address, length,
-                )))
-            }
-            "poke" => {
-                let address = self.address(&words, 0, "poke wants an address")?;
-                if words.len() < 2 {
-                    return Err(CommandError::new(
-                        "poke wants hex bytes, e.g. `poke D180 41 42`",
-                    ));
-                }
-                // Separators are optional, so the tail is joined and parsed as one.
-                let parsed = parse_bytes(&words[1..].join(" "))?;
-                self.emu.poke_block(address, &parsed);
-                Ok(CommandResult::Output(format!(
-                    "{} bytes written at {address:05X}h\n",
-                    parsed.len()
-                )))
-            }
-            "stack" | "st" => {
-                let length = match words.first() {
-                    Some(_) => self.bounded_length(&words, 0, "stack")?,
-                    None => 32,
-                };
-                Ok(CommandResult::Output(view::stack(self.emu, length)))
-            }
+            "m" | "mem" | "dump" => self.dump_memory(&words),
+            "poke" => self.poke_memory(&words),
+            "stack" | "st" => self.stack(&words),
 
-            // ---------------------------------------------------------------- views
-            "disas" | "u" | "dis" => {
-                let address = match words.first() {
-                    Some(word) => parse_number(word)
-                        .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?,
-                    None => self.emu.pc(),
-                };
-                let count = match words.get(1) {
-                    Some(word) => parse_number(word)
-                        .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?
-                        as usize,
-                    None => 10,
-                };
-                Ok(CommandResult::Output(view::disassembly(
-                    self.debugger,
-                    self.emu,
-                    address,
-                    count,
-                )))
-            }
+            "disas" | "u" | "dis" => self.disassemble_command(&words),
             "context" | "ctx" => Ok(CommandResult::Output(format!(
                 "{}{}{}",
                 view::summary(self.emu),
@@ -323,87 +193,23 @@ impl Session<'_> {
                 view::peripherals(self.emu)
             ))),
 
-            // -------------------------------------------------------------- patches
-            "patch" => {
-                let address = self.address(&words, 0, "patch wants an address")?;
-                let text = words[1..].join(" ");
-                if text.is_empty() {
-                    return Err(CommandError::new("patch wants an instruction"));
-                }
-                let bytes = patch::assemble_instruction(&text)
-                    .map_err(|error| CommandError::new(error.to_string()))?;
-                let applied = self
-                    .debugger
-                    .apply_patch(self.emu, address, &bytes, &text)
-                    .map_err(|error| CommandError::new(error.to_string()))?;
-                Ok(CommandResult::Output(format!(
-                    "{:07X}h: {} (was {}) -- {}\n",
-                    applied.address,
-                    applied.byte_text(),
-                    applied.original_text(),
-                    applied.source
-                )))
-            }
+            "patch" => self.apply_patch(&words),
             "patches" => Ok(CommandResult::Output(view::state(self.debugger, self.emu))),
-            "undo" => {
-                let address = self.address(&words, 0, "undo wants an address")?;
-                if self.debugger.undo_patch(self.emu, address) {
-                    Ok(CommandResult::Output(format!("undid {address:07X}h\n")))
-                } else {
-                    Err(CommandError::new(format!("no patch at {address:07X}h")))
-                }
-            }
+            "undo" => self.undo_patch(&words),
             "undoall" => {
                 let count = self.debugger.undo_all_patches(self.emu);
                 Ok(CommandResult::Output(format!("{count} patches undone\n")))
             }
 
-            // ------------------------------------------------------------ snapshots
-            "snap" => {
-                let name = words
-                    .first()
-                    .ok_or_else(|| CommandError::new("snap wants a name"))?;
-                self.debugger.save_snapshot(*name, self.emu);
-                Ok(CommandResult::Output(format!("saved {name}\n")))
-            }
-            "restore" | "rs" => {
-                let name = words
-                    .first()
-                    .ok_or_else(|| CommandError::new("restore wants a name"))?;
-                if self.debugger.restore_snapshot(name, self.emu) {
-                    Ok(CommandResult::Output(view::summary(self.emu)))
-                } else {
-                    Err(CommandError::new(format!("no snapshot called {name}")))
-                }
-            }
+            "snap" => self.save_snapshot(&words),
+            "restore" | "rs" => self.restore_snapshot(&words),
             "snaps" => Ok(CommandResult::Output(view::state(self.debugger, self.emu))),
-            "diff" => {
-                let left = *words
-                    .first()
-                    .ok_or_else(|| CommandError::new("diff wants two names"))?;
-                let right = *words
-                    .get(1)
-                    .ok_or_else(|| CommandError::new("diff wants two names"))?;
-                let diff = self.debugger.diff_snapshots(left, right).ok_or_else(|| {
-                    CommandError::new(format!("no snapshot called {left} or {right}"))
-                })?;
-                Ok(CommandResult::Output(view::diff(&diff)))
-            }
-            "diffnow" => {
-                let name = words
-                    .first()
-                    .ok_or_else(|| CommandError::new("diffnow wants a name"))?;
-                let diff = self
-                    .debugger
-                    .diff_with_now(name, self.emu)
-                    .ok_or_else(|| CommandError::new(format!("no snapshot called {name}")))?;
-                Ok(CommandResult::Output(view::diff(&diff)))
-            }
+            "diff" => self.diff_snapshots(&words),
+            "diffnow" => self.diff_now(&words),
 
             // ----------------------------------------------------------------- trace
             "trace" => self.trace(&words),
 
-            // ------------------------------------------------------------------ keys
             // `tap` is the one key command: press it, wait for the ROM to *accept*
             // it, then let go.
             //
@@ -417,25 +223,7 @@ impl Session<'_> {
             // expects: `tap SHIFT` arms it, and the ROM keeps it armed until the
             // next key, so `tap SHIFT` then `tap 8` opens the unit menu without
             // either key being held.
-            "tap" | "press" => {
-                let name = words
-                    .first()
-                    .ok_or_else(|| CommandError::new("tap wants a name, e.g. `tap 8`"))?;
-                let code = self.key_code(name)?;
-                // `tap EXE 0` runs nothing after the accept edge.  A script that
-                // wants to watch what the key *causes* needs that: the interesting
-                // work -- evaluating, copying the input area, running a ROP chain --
-                // happens in the settle window, so a settle would step over all of
-                // it before the next breakpoint could be armed.
-                let settle = self
-                    .optional_number(&words, 1, "tap")?
-                    .unwrap_or(DEFAULT_SETTLE_TICKS);
-                let stopped = self.tap_key(code, settle)?;
-                Ok(CommandResult::Output(match stopped {
-                    Some(reason) => format!("tapped {name} ({code:02X}h); {}\n", reason.text()),
-                    None => format!("tapped {name} ({code:02X}h)\n"),
-                }))
-            }
+            "tap" | "press" => self.tap(&words),
             // `latch` holds a key down without a finger, and toggles it off again.
             //
             // This is the right-click behaviour from the window, and it is what the
@@ -443,103 +231,385 @@ impl Session<'_> {
             // combination (SHIFT and 7 held through an ON reset) and a multi-key
             // chord.  A latched key also survives a reset, which is what makes the
             // self-test work at all -- see the note in `keyboard.rs`.
-            "latch" => {
-                if words.is_empty() {
-                    return Err(CommandError::new("latch wants at least one key"));
-                }
-                let mut changed = Vec::new();
-                for name in &words {
-                    let code = self.key_code(name)?;
-                    let was_latched = self.emu.chipset.keyboard.borrow().is_stuck(code);
-                    if !self.emu.chipset.press_key_with(code, true) {
-                        return Err(CommandError::new(format!(
-                            "no such matrix code {code:02X}h"
-                        )));
-                    }
-                    changed.push(format!(
-                        "{name} ({code:02X}h)={}",
-                        if was_latched { "off" } else { "on" }
-                    ));
-                }
-                self.debugger
-                    .run_uninterrupted(self.emu, DEFAULT_SETTLE_TICKS);
-                Ok(CommandResult::Output(format!(
-                    "latched {}\n",
-                    changed.join(" ")
-                )))
-            }
-            "keys" => {
-                let text = words.join(" ");
-                if text.is_empty() {
-                    return Err(CommandError::new("keys wants something to press"));
-                }
-                // Split first, then press: the split borrows the keyboard and
-                // pressing needs the machine mutably.
-                let names = {
-                    let keyboard = self.emu.chipset.keyboard.borrow();
-                    tokenize_keys(keyboard.table(), &text)
-                };
-                let mut pressed = Vec::new();
-                for name in names {
-                    let code = self.key_code(&name)?;
-                    if let Some(reason) = self.tap_key(code, DEFAULT_SETTLE_TICKS)? {
-                        return Ok(CommandResult::Output(format!("{}\n", reason.text())));
-                    }
-                    pressed.push(name);
-                }
-                Ok(CommandResult::Output(format!(
-                    "pressed {}\n",
-                    pressed.join(" ")
-                )))
-            }
+            "latch" => self.latch(&words),
+            "keys" => self.keys(&words),
 
-            // ------------------------------------------------------------- meta
             "echo" => Ok(CommandResult::Output(format!("{rest}\n"))),
             // `assert` is what makes a script evidence rather than a transcript: it
             // fails loudly when a claim is wrong, and the runner stops there.  The
             // condition language already knows how to compare, so this reuses it.
-            "assert" => {
-                if rest.is_empty() {
-                    return Err(CommandError::new("assert wants a condition"));
-                }
-                let condition =
-                    Expr::parse(rest).map_err(|error| CommandError::new(error.to_string()))?;
-                let hits = 0;
-                let holds = {
-                    let mut context = crate::condition::Context {
-                        regs: &self.emu.chipset.cpu.regs,
-                        bus: &mut self.emu.chipset.bus,
-                        hits,
-                    };
-                    condition.eval(&mut context)
-                };
-                if holds {
-                    Ok(CommandResult::Silent)
-                } else {
-                    Err(CommandError::new(format!("assert failed: {rest}")))
-                }
-            }
-            "fill" => {
-                let address = self.address(&words, 0, "fill wants an address")?;
-                let length = self.bounded_length(&words, 1, "fill")?;
-                let byte = match words.get(2) {
-                    Some(word) => parse_number(word)
-                        .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?
-                        as u8,
-                    None => 0,
-                };
-                let block = vec![byte; length];
-                self.emu.poke_block(address, &block);
-                Ok(CommandResult::Output(format!(
-                    "{length} bytes of {byte:02X}h at {address:05X}h\n"
-                )))
-            }
+            "assert" => self.assert(rest),
+            "fill" => self.fill_memory(&words),
             "q" | "quit" | "exit" => Ok(CommandResult::Quit),
             "help" | "?" => Ok(CommandResult::Output(help())),
             other => Err(CommandError::new(format!(
                 "unknown command {other:?}; try `help`"
             ))),
         }
+    }
+
+    /// `s [count]`: execute instructions and report each stop.
+    fn step(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let count = self.optional_number(words, 0, "step")?.unwrap_or(1);
+        for _ in 0..count {
+            let reason = self.debugger.step(self.emu);
+            self.report_step(&reason)?;
+        }
+        Ok(CommandResult::Output(view::summary(self.emu)))
+    }
+
+    /// `n`: run to the return address of the call about to execute.
+    fn step_over(&mut self) -> Result<CommandResult> {
+        let reason = self.debugger.step_over(self.emu, DEFAULT_BUDGET);
+        self.report_step(&reason)?;
+        Ok(CommandResult::Output(view::summary(self.emu)))
+    }
+
+    /// `out`: run to the caller, using the link register.
+    fn step_out(&mut self) -> Result<CommandResult> {
+        let reason = self.debugger.step_out(self.emu, DEFAULT_BUDGET);
+        self.report_step(&reason)?;
+        Ok(CommandResult::Output(view::summary(self.emu)))
+    }
+
+    /// `g [budget]`: run until something stops the machine.
+    fn go(&mut self, words: &[&str]) -> Result<CommandResult> {
+        // An optional budget, because the ROM parks in STOP for most of its
+        // life and a run that has to wait out a sleep needs a bigger one.
+        let budget = self
+            .optional_number(words, 0, "g")?
+            .unwrap_or(DEFAULT_BUDGET);
+        let reason = self.debugger.run(self.emu, budget);
+        Ok(CommandResult::Output(self.stop_text(&reason)))
+    }
+
+    /// `r ADDR`: run until the PC reaches an address.
+    fn run_to_address(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "run to an address")?;
+        let reason = self.debugger.run_to(self.emu, address, DEFAULT_BUDGET);
+        Ok(CommandResult::Output(self.stop_text(&reason)))
+    }
+
+    /// `t COUNT`: run a fixed number of ticks, ignoring breakpoints.
+    fn ticks(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let count = self.required_number(words, 0, "t wants a tick count")?;
+        self.debugger.run_uninterrupted(self.emu, count);
+        Ok(CommandResult::Output(view::summary(self.emu)))
+    }
+
+    /// `runmode run`: leave STOP, which a stepper otherwise cannot.
+    fn force_run(&mut self, words: &[&str]) -> Result<CommandResult> {
+        // The one command that does something about STOP, which a stepper
+        // otherwise cannot leave.
+        if words.first() != Some(&"run") {
+            return Err(CommandError::new("runmode wants `run`"));
+        }
+        self.debugger.force_run(self.emu);
+        Ok(CommandResult::Output("running\n".to_string()))
+    }
+
+    /// `be`/`bd`: enable or disable a breakpoint by number.
+    fn set_breakpoint_enabled(&mut self, words: &[&str], enable: bool) -> Result<CommandResult> {
+        let id = self.breakpoint_id(words, "be wants a breakpoint number")?;
+        match self.debugger.breakpoint_mut(id) {
+            Some(breakpoint) => {
+                breakpoint.enabled = enable;
+                Ok(CommandResult::Output(format!(
+                    "breakpoint {} {}\n",
+                    id.0,
+                    if enable { "enabled" } else { "disabled" }
+                )))
+            }
+            None => Err(CommandError::new(format!("no breakpoint {}", id.0))),
+        }
+    }
+
+    /// `get NAME`: print one register.
+    fn get_register(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = words
+            .first()
+            .ok_or_else(|| CommandError::new("get wants a register name"))?;
+        let value = self.register_value(name)?;
+        Ok(CommandResult::Output(format!("{name} = {value:04X}h\n")))
+    }
+
+    /// `set NAME VALUE`: write one register.
+    fn set_register_command(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = *words
+            .first()
+            .ok_or_else(|| CommandError::new("set wants a register name"))?;
+        let text = *words
+            .get(1)
+            .ok_or_else(|| CommandError::new("set wants a value"))?;
+        let value =
+            parse_number(text).ok_or_else(|| CommandError::new(format!("cannot read {text:?}")))?;
+        self.set_register(name, value as u64)?;
+        Ok(CommandResult::Output(view::registers(self.emu)))
+    }
+
+    /// `sp VALUE`: set the stack pointer.
+    fn set_stack_pointer(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let text = *words
+            .first()
+            .ok_or_else(|| CommandError::new("sp wants a value"))?;
+        let value =
+            parse_number(text).ok_or_else(|| CommandError::new(format!("cannot read {text:?}")))?;
+        self.emu.set_sp(value as u16);
+        Ok(CommandResult::Output(view::registers(self.emu)))
+    }
+
+    /// `m [LEN]`: a hex dump with an ASCII column.
+    fn dump_memory(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "m wants an address")?;
+        let length = match words.get(1) {
+            Some(_) => self.bounded_length(words, 1, "m")?,
+            None => 0x40,
+        };
+        Ok(CommandResult::Output(view::memory(
+            self.emu, address, length,
+        )))
+    }
+
+    /// `poke ADDR BYTES`: write bytes into the address space.
+    fn poke_memory(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "poke wants an address")?;
+        if words.len() < 2 {
+            return Err(CommandError::new(
+                "poke wants hex bytes, e.g. `poke D180 41 42`",
+            ));
+        }
+        // Separators are optional, so the tail is joined and parsed as one.
+        let parsed = parse_bytes(&words[1..].join(" "))?;
+        self.emu.poke_block(address, &parsed);
+        Ok(CommandResult::Output(format!(
+            "{} bytes written at {address:05X}h\n",
+            parsed.len()
+        )))
+    }
+
+    /// `stack [LEN]`: the stack from `SP` upwards, with code-looking slots
+    /// labelled.
+    fn stack(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let length = match words.first() {
+            Some(_) => self.bounded_length(words, 0, "stack")?,
+            None => 32,
+        };
+        Ok(CommandResult::Output(view::stack(self.emu, length)))
+    }
+
+    /// `disas [ADDR] [COUNT]`: disassemble around an address or the PC.
+    fn disassemble_command(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = match words.first() {
+            Some(word) => parse_number(word)
+                .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?,
+            None => self.emu.pc(),
+        };
+        let count = match words.get(1) {
+            Some(word) => parse_number(word)
+                .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?
+                as usize,
+            None => 10,
+        };
+        Ok(CommandResult::Output(view::disassembly(
+            self.debugger,
+            self.emu,
+            address,
+            count,
+        )))
+    }
+
+    /// `patch ADDR INSTRUCTION`: assemble and plant one instruction.
+    fn apply_patch(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "patch wants an address")?;
+        let text = words[1..].join(" ");
+        if text.is_empty() {
+            return Err(CommandError::new("patch wants an instruction"));
+        }
+        let bytes = patch::assemble_instruction(&text)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+        let applied = self
+            .debugger
+            .apply_patch(self.emu, address, &bytes, &text)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+        Ok(CommandResult::Output(format!(
+            "{:07X}h: {} (was {}) -- {}\n",
+            applied.address,
+            applied.byte_text(),
+            applied.original_text(),
+            applied.source
+        )))
+    }
+
+    /// `undo ADDR`: remove the patch at an address.
+    fn undo_patch(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "undo wants an address")?;
+        if self.debugger.undo_patch(self.emu, address) {
+            Ok(CommandResult::Output(format!("undid {address:07X}h\n")))
+        } else {
+            Err(CommandError::new(format!("no patch at {address:07X}h")))
+        }
+    }
+
+    /// `snap NAME`: save the machine state under a name.
+    fn save_snapshot(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = words
+            .first()
+            .ok_or_else(|| CommandError::new("snap wants a name"))?;
+        self.debugger.save_snapshot(*name, self.emu);
+        Ok(CommandResult::Output(format!("saved {name}\n")))
+    }
+
+    /// `restore NAME`: roll the machine back to a snapshot.
+    fn restore_snapshot(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = words
+            .first()
+            .ok_or_else(|| CommandError::new("restore wants a name"))?;
+        if self.debugger.restore_snapshot(name, self.emu) {
+            Ok(CommandResult::Output(view::summary(self.emu)))
+        } else {
+            Err(CommandError::new(format!("no snapshot called {name}")))
+        }
+    }
+
+    /// `diff LEFT RIGHT`: what differs between two snapshots.
+    fn diff_snapshots(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let left = *words
+            .first()
+            .ok_or_else(|| CommandError::new("diff wants two names"))?;
+        let right = *words
+            .get(1)
+            .ok_or_else(|| CommandError::new("diff wants two names"))?;
+        let diff = self
+            .debugger
+            .diff_snapshots(left, right)
+            .ok_or_else(|| CommandError::new(format!("no snapshot called {left} or {right}")))?;
+        Ok(CommandResult::Output(view::diff(&diff)))
+    }
+
+    /// `diffnow NAME`: what differs between a snapshot and the machine now.
+    fn diff_now(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = words
+            .first()
+            .ok_or_else(|| CommandError::new("diffnow wants a name"))?;
+        let diff = self
+            .debugger
+            .diff_with_now(name, self.emu)
+            .ok_or_else(|| CommandError::new(format!("no snapshot called {name}")))?;
+        Ok(CommandResult::Output(view::diff(&diff)))
+    }
+
+    /// `tap NAME [SETTLE]`: press a key, wait for the ROM to accept it, and
+    /// let go.
+    fn tap(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let name = words
+            .first()
+            .ok_or_else(|| CommandError::new("tap wants a name, e.g. `tap 8`"))?;
+        let code = self.key_code(name)?;
+        // `tap EXE 0` runs nothing after the accept edge.  A script that
+        // wants to watch what the key *causes* needs that: the interesting
+        // work -- evaluating, copying the input area, running a ROP chain --
+        // happens in the settle window, so a settle would step over all of
+        // it before the next breakpoint could be armed.
+        let settle = self
+            .optional_number(words, 1, "tap")?
+            .unwrap_or(DEFAULT_SETTLE_TICKS);
+        let stopped = self.tap_key(code, settle)?;
+        Ok(CommandResult::Output(match stopped {
+            Some(reason) => format!("tapped {name} ({code:02X}h); {}\n", reason.text()),
+            None => format!("tapped {name} ({code:02X}h)\n"),
+        }))
+    }
+
+    /// `latch NAME...`: hold keys down without a finger, toggling each.
+    fn latch(&mut self, words: &[&str]) -> Result<CommandResult> {
+        if words.is_empty() {
+            return Err(CommandError::new("latch wants at least one key"));
+        }
+        let mut changed = Vec::new();
+        for name in words {
+            let code = self.key_code(name)?;
+            let was_latched = self.emu.chipset.keyboard.borrow().is_stuck(code);
+            if !self.emu.chipset.press_key_with(code, true) {
+                return Err(CommandError::new(format!(
+                    "no such matrix code {code:02X}h"
+                )));
+            }
+            changed.push(format!(
+                "{name} ({code:02X}h)={}",
+                if was_latched { "off" } else { "on" }
+            ));
+        }
+        self.debugger
+            .run_uninterrupted(self.emu, DEFAULT_SETTLE_TICKS);
+        Ok(CommandResult::Output(format!(
+            "latched {}\n",
+            changed.join(" ")
+        )))
+    }
+
+    /// `keys TEXT`: split a string into keys and press them in order.
+    fn keys(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let text = words.join(" ");
+        if text.is_empty() {
+            return Err(CommandError::new("keys wants something to press"));
+        }
+        // Split first, then press: the split borrows the keyboard and
+        // pressing needs the machine mutably.
+        let names = {
+            let keyboard = self.emu.chipset.keyboard.borrow();
+            tokenize_keys(keyboard.table(), &text)
+        };
+        let mut pressed = Vec::new();
+        for name in names {
+            let code = self.key_code(&name)?;
+            if let Some(reason) = self.tap_key(code, DEFAULT_SETTLE_TICKS)? {
+                return Ok(CommandResult::Output(format!("{}\n", reason.text())));
+            }
+            pressed.push(name);
+        }
+        Ok(CommandResult::Output(format!(
+            "pressed {}\n",
+            pressed.join(" ")
+        )))
+    }
+
+    /// `assert CONDITION`: fail the script when a claim does not hold.
+    fn assert(&mut self, rest: &str) -> Result<CommandResult> {
+        if rest.is_empty() {
+            return Err(CommandError::new("assert wants a condition"));
+        }
+        let condition = Expr::parse(rest).map_err(|error| CommandError::new(error.to_string()))?;
+        let hits = 0;
+        let holds = {
+            let mut context = crate::condition::Context {
+                regs: &self.emu.chipset.cpu.regs,
+                bus: &mut self.emu.chipset.bus,
+                hits,
+            };
+            condition.eval(&mut context)
+        };
+        if holds {
+            Ok(CommandResult::Silent)
+        } else {
+            Err(CommandError::new(format!("assert failed: {rest}")))
+        }
+    }
+
+    /// `fill ADDR LEN [BYTE]`: write a run of one byte.
+    fn fill_memory(&mut self, words: &[&str]) -> Result<CommandResult> {
+        let address = self.address(words, 0, "fill wants an address")?;
+        let length = self.bounded_length(words, 1, "fill")?;
+        let byte = match words.get(2) {
+            Some(word) => parse_number(word)
+                .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?
+                as u8,
+            None => 0,
+        };
+        let block = vec![byte; length];
+        self.emu.poke_block(address, &block);
+        Ok(CommandResult::Output(format!(
+            "{length} bytes of {byte:02X}h at {address:05X}h\n"
+        )))
     }
 
     // -------------------------------------------------------------- helpers
