@@ -404,79 +404,22 @@ pub const NATURAL_HEIGHT: u32 = SKIN_H;
 
 // ------------------------------------------------------------------ PNG out
 //
-// A minimal truecolour-with-alpha encoder, for `emu render`.  Deflate blocks are
-// emitted *stored* (uncompressed) because compressing needs zlib and this
-// workspace deliberately has no third-party dependencies.  Files are larger but
-// byte-exact, which is what the golden comparisons want anyway.
+// The container comes from `fx991_chipset::png`, shared with the raw screen dump:
+// the framing is identical and only the pixels differ.  Deflate blocks are emitted
+// *stored* (uncompressed) because compressing needs zlib and this workspace
+// deliberately has no third-party dependencies.  Files are larger but byte-exact,
+// which is what the golden comparisons want anyway.
 
 impl Frame {
     /// Encode as an 8-bit RGBA PNG.
     pub fn to_png(&self) -> Vec<u8> {
-        let mut raw = Vec::with_capacity((self.height * (1 + self.width * 4)) as usize);
-        for y in 0..self.height {
-            raw.push(0); // filter type 0 (None) for each scanline
-            let row = (y * self.width * 4) as usize;
-            raw.extend_from_slice(&self.rgba[row..row + (self.width * 4) as usize]);
-        }
-
-        let mut png = Vec::new();
-        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&self.width.to_be_bytes());
-        ihdr.extend_from_slice(&self.height.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
-        push_chunk(&mut png, b"IHDR", &ihdr);
-        push_chunk(&mut png, b"IDAT", &zlib_stored(&raw));
-        push_chunk(&mut png, b"IEND", &[]);
-        png
+        fx991_chipset::png::encode(
+            &self.rgba,
+            self.width,
+            self.height,
+            fx991_chipset::png::ColourType::TruecolourAlpha,
+        )
     }
-}
-
-fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    let mut body = Vec::with_capacity(4 + payload.len());
-    body.extend_from_slice(tag);
-    body.extend_from_slice(payload);
-    out.extend_from_slice(&body);
-    out.extend_from_slice(&crc32(&body).to_be_bytes());
-}
-
-/// A zlib stream made entirely of stored (type 0) deflate blocks.
-fn zlib_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x78, 0x01]; // CMF/FLG: deflate, 32K window, no dict
-    let mut offset = 0;
-    while offset < data.len() {
-        let take = (data.len() - offset).min(0xFFFF);
-        let final_block = offset + take >= data.len();
-        out.push(if final_block { 1 } else { 0 });
-        out.extend_from_slice(&(take as u16).to_le_bytes());
-        out.extend_from_slice(&(!(take as u16)).to_le_bytes());
-        out.extend_from_slice(&data[offset..offset + take]);
-        offset += take;
-    }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
-    out
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for byte in data {
-        a = (a + *byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }
 
 #[cfg(test)]

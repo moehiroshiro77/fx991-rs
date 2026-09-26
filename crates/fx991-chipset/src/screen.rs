@@ -177,45 +177,42 @@ impl Screen {
     /// One pixel per bit, so this shows exactly what the guest wrote.  It is a
     /// debugging aid, not a picture of the calculator's font.
     ///
-    /// Deflate blocks are emitted *stored* (uncompressed) rather than compressed:
-    /// storing a PNG properly needs zlib, and this workspace deliberately has no
-    /// third-party dependencies.  Files are larger but byte-exact.
+    /// The container comes from [`crate::png`], which is shared with the composed
+    /// face: the framing is the same either way, and only the pixels differ.
     pub fn to_png(&self, scale: usize) -> Vec<u8> {
         let scale = scale.max(1);
-        let width = ROW_SIZE_DISP * 8 * scale;
-        let height = N_ROW * scale;
+        let width = ROW_SIZE_DISP * 8;
+        let height = N_ROW;
         let on = [30u8, 52, 90];
         let off = [210u8, 220, 200];
 
-        let mut raw = Vec::with_capacity(height * (1 + width * 3));
-        for iy in 0..N_ROW {
+        // One row at 1:1, scaled horizontally, then repeated `scale` times
+        // vertically.  Both directions have to be scaled: repeating whole rows
+        // alone would stretch the picture only downwards.
+        let mut raw = Vec::with_capacity(width * scale * height * scale * 3);
+        for iy in 0..height {
             let base = iy * ROW_SIZE + OFFSET;
-            let mut line = Vec::with_capacity(width * 3);
+            let mut row = Vec::with_capacity(width * scale * 3);
             for ix in 0..ROW_SIZE_DISP {
                 let byte = self.buffer[base + ix];
                 for bit in (0..8).rev() {
                     let colour = if byte & (1 << bit) != 0 { on } else { off };
                     for _ in 0..scale {
-                        line.extend_from_slice(&colour);
+                        row.extend_from_slice(&colour);
                     }
                 }
             }
             for _ in 0..scale {
-                raw.push(0); // filter type 0 for each scanline
-                raw.extend_from_slice(&line);
+                raw.extend_from_slice(&row);
             }
         }
 
-        let mut png = Vec::new();
-        png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&(width as u32).to_be_bytes());
-        ihdr.extend_from_slice(&(height as u32).to_be_bytes());
-        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit truecolour
-        push_chunk(&mut png, b"IHDR", &ihdr);
-        push_chunk(&mut png, b"IDAT", &zlib_stored(&raw));
-        push_chunk(&mut png, b"IEND", &[]);
-        png
+        crate::png::encode(
+            &raw,
+            (width * scale) as u32,
+            (height * scale) as u32,
+            crate::png::ColourType::Truecolour,
+        )
     }
 
     /// Read an SFR this peripheral owns.
@@ -282,56 +279,6 @@ impl Screen {
     pub fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
     }
-}
-
-fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], payload: &[u8]) {
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    let mut body = Vec::with_capacity(4 + payload.len());
-    body.extend_from_slice(tag);
-    body.extend_from_slice(payload);
-    out.extend_from_slice(&body);
-    out.extend_from_slice(&crc32(&body).to_be_bytes());
-}
-
-/// Wrap bytes in a zlib stream built from stored (uncompressed) deflate blocks.
-fn zlib_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = vec![0x78, 0x01]; // zlib header: deflate, no preset dictionary
-    let mut remaining = data;
-    while !remaining.is_empty() {
-        let take = remaining.len().min(0xFFFF);
-        let last = take == remaining.len();
-        out.push(if last { 1 } else { 0 }); // BFINAL, BTYPE=00 (stored)
-        out.extend_from_slice(&(take as u16).to_le_bytes());
-        out.extend_from_slice(&(!(take as u16)).to_le_bytes());
-        out.extend_from_slice(&remaining[..take]);
-        remaining = &remaining[take..];
-    }
-    if data.is_empty() {
-        out.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
-    }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
-    out
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for byte in data {
-        a = (a + *byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }
 
 #[cfg(test)]

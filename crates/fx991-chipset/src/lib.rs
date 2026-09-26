@@ -54,6 +54,7 @@
 pub mod interrupts;
 pub mod keyboard;
 pub mod misc;
+pub mod png;
 pub mod screen;
 pub mod timer;
 
