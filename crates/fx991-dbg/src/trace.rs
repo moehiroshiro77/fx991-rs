@@ -20,13 +20,17 @@
 //!
 //! The address, the handler name the core ran, the stack pointer, and which
 //! registers that instruction changed.  The register changes are computed by
-//! comparing against the previous entry, so they cost nothing extra and answer the
+//! comparing the snapshots taken either side of the instruction, so they answer the
 //! question a trace is usually opened to answer: *which* instruction moved the
 //! value being chased.
 //!
-//! Nothing here allocates per instruction beyond the ring slot itself, because a
-//! trace you can only afford to run occasionally is a trace that is not running
-//! when the bug happens.
+//! A trace is meant to be left running, so nothing here does more work per
+//! instruction than it has to: no formatting, no lookup, and one allocation --
+//! the list of changed registers, which is at most sixteen small tuples and is
+//! empty for most instructions.  Growing that list is the only per-instruction
+//! allocation, and `Vec` is what makes the alternative below worth not taking:
+//! an inline array would remove it at the cost of a wider entry for every
+//! instruction, including the many that changed nothing.
 
 use std::collections::VecDeque;
 
@@ -189,17 +193,21 @@ impl TraceRing {
     ///
     /// The column names match `fx991::Trace`'s where the fields overlap, so a
     /// trace from either path can be diffed or plotted the same way.
+    ///
+    /// Every field is escaped, not just the ones expected to need it: a comma in a
+    /// handler name or a quote in a register list would otherwise shift the columns
+    /// or truncate the row, and a malformed trace is worse than a verbose one.
     pub fn to_csv(&self) -> String {
         let mut out = String::from("tick,pc,handler,sp,psw,changed\n");
         for entry in &self.entries {
             out.push_str(&format!(
-                "{},{:#07x},{},{:#06x},{:#04x},\"{}\"\n",
+                "{},{},{},{},{},{}\n",
                 entry.tick,
                 entry.pc,
-                entry.handler_text(),
+                escape_csv(entry.handler_text()),
                 entry.sp,
                 entry.psw,
-                entry.changed_text()
+                escape_csv(&entry.changed_text())
             ));
         }
         out
@@ -209,6 +217,27 @@ impl TraceRing {
     pub fn addresses(&self) -> Vec<u32> {
         self.entries.iter().map(|entry| entry.pc).collect()
     }
+}
+
+/// Quote a field for CSV, per RFC 4180: wrap it when it holds a delimiter, a quote
+/// or a newline, and double any quote inside.
+///
+/// A field that needs none of that is emitted bare, so the common case stays
+/// readable and the file is still valid.
+fn escape_csv(field: &str) -> String {
+    if !field.contains([',', '"', '\n', '\r']) {
+        return field.to_string();
+    }
+    let mut out = String::with_capacity(field.len() + 2);
+    out.push('"');
+    for character in field.chars() {
+        if character == '"' {
+            out.push('"');
+        }
+        out.push(character);
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -374,8 +403,42 @@ mod tests {
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines.len(), 3, "header plus two entries");
         assert!(lines[0].starts_with("tick,pc,handler,sp,psw,changed"));
-        assert!(lines[1].contains("0x0946a"), "{}", lines[1]);
+        // Plain decimal for the numbers: a spreadsheet reads the column as a
+        // number, which an `0x`-prefixed field would not be.
+        assert!(lines[1].starts_with("7,37994,"), "{}", lines[1]);
+        assert!(lines[1].ends_with(",R0=00>11"), "{}", lines[1]);
         assert!(lines[2].contains("R0=11>22"), "{}", lines[2]);
+        // Six fields per row, so the columns line up.
+        for line in &lines[1..] {
+            assert_eq!(line.split(',').count(), 6, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_field_that_needs_quoting_gets_it() {
+        // The changed list can never hold a comma today, but the handler name is a
+        // public field and a row with the wrong number of columns is a malformed
+        // file rather than a cosmetic problem.
+        assert_eq!(escape_csv("POP PC"), "POP PC", "nothing to escape");
+        assert_eq!(escape_csv("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(escape_csv("two\nlines"), "\"two\nlines\"");
+
+        let mut ring = TraceRing::new(1);
+        ring.record(Sample {
+            tick: 1,
+            pc: 2,
+            handler: Some("WEIRD,NAME"),
+            registers_before: &[0u8; 16],
+            registers_after: &[0u8; 16],
+            sp: 0,
+            psw: 0,
+        });
+        let csv = ring.to_csv();
+        let row = csv.lines().nth(1).expect("one entry");
+        assert!(row.contains("\"WEIRD,NAME\""), "{row}");
+        // Still six columns: the comma stayed inside the quotes.
+        assert_eq!(row.matches(',').count(), 6, "{row}");
     }
 
     #[test]
