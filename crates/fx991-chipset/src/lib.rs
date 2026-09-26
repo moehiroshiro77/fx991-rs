@@ -63,7 +63,7 @@ use std::rc::Rc;
 use fx991_bus::{Bus, SfrDevice};
 use fx991_model::address;
 use nxu8_core::ops::ctrl::ControlSink;
-use nxu8_core::{Cpu, Memory};
+use nxu8_core::{Cpu, Memory, Regs};
 
 pub use interrupts::{RunMode, INT_COUNT, INT_MASKABLE, INT_RESET, INT_SOFTWARE};
 
@@ -75,11 +75,17 @@ use timer::Timer;
 
 type Shared<T> = Rc<RefCell<T>>;
 
-/// The hook [`Chipset::tick`] calls before each instruction: physical PC, bus.
+/// The hook [`Chipset::tick`] calls before each instruction: physical PC,
+/// registers, bus.
 ///
 /// Returning `true` suppresses the instruction.  The bus is mutable so a caller
 /// can *inspect* memory before deciding (and, for a debugger, patch it).
-pub type PreExecute<'a> = &'a mut dyn FnMut(u32, &mut Bus) -> bool;
+///
+/// The registers are handed over because this is the last moment at which they
+/// still describe the instruction about to run.  Reading them after the tick
+/// gives the state the *next* instruction starts from, which is a different
+/// thing -- an interrupt taken during the tick can even have moved the stack.
+pub type PreExecute<'a> = &'a mut dyn FnMut(u32, &Regs, &mut Bus) -> bool;
 
 /// The interrupt mask (`0xF010`) and pending (`0xF014`) registers.
 ///
@@ -441,7 +447,8 @@ impl Chipset {
 
         // --- if run_mode == RM_RUN: cpu.Next ------------------------------
         if let Some(hook) = pre_execute.as_mut() {
-            if hook(self.cpu.regs.physical_pc(), &mut self.bus) {
+            let pc = self.cpu.regs.physical_pc();
+            if hook(pc, &self.cpu.regs, &mut self.bus) {
                 return TickOutcome::Suppressed;
             }
         }
@@ -692,7 +699,7 @@ mod tests {
         let mut machine = chipset();
         machine.reset();
         let mut seen = Vec::new();
-        let outcome = machine.tick(Some(&mut |pc, _bus| {
+        let outcome = machine.tick(Some(&mut |pc, _regs, _bus| {
             seen.push(pc);
             false
         }));
@@ -704,7 +711,7 @@ mod tests {
     fn a_hook_can_suppress_the_instruction() {
         let mut machine = chipset();
         machine.reset();
-        let outcome = machine.tick(Some(&mut |pc, _bus| pc == 0x0_946A));
+        let outcome = machine.tick(Some(&mut |pc, _regs, _bus| pc == 0x0_946A));
         assert_eq!(outcome, TickOutcome::Suppressed);
         assert_eq!(machine.cpu.regs.pc, 0x946A, "PC stayed at the entry");
         assert_eq!(machine.tick(None), TickOutcome::Executed("OP_BC"));
@@ -750,7 +757,7 @@ mod tests {
         machine.interrupts.borrow_mut().stop();
         let before = machine.cpu.regs.pc;
         let mut seen = Vec::new();
-        machine.tick(Some(&mut |pc, _bus| {
+        machine.tick(Some(&mut |pc, _regs, _bus| {
             seen.push(pc);
             false
         }));
@@ -935,7 +942,7 @@ mod tests {
         machine.poke(0x0_D180, 0xAB);
 
         let mut seen = None;
-        machine.tick(Some(&mut |_pc, bus| {
+        machine.tick(Some(&mut |_pc, _regs, bus| {
             seen = Some(bus.peek_quiet(0x0_D180));
             false
         }));

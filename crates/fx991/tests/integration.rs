@@ -62,7 +62,7 @@ fn boot_lands_on_the_reset_entry_and_then_past_its_trampoline() {
     machine.reset();
 
     let mut entry_seen = None;
-    machine.tick(Some(&mut |pc, _bus| {
+    machine.tick(Some(&mut |pc, _regs, _bus| {
         entry_seen = Some(pc);
         false
     }));
@@ -276,6 +276,25 @@ fn a_breakpoint_records_its_hits_up_to_the_limit() {
     assert_eq!(hits.len(), 4, "the record limit is honoured");
     assert_eq!(hits[0].pc, 0x0_9216);
     assert!(hits[0].tick <= hits[3].tick, "records are in order");
+}
+
+#[test]
+fn a_recorded_hit_carries_the_state_the_instruction_started_from() {
+    // The entry point is a real instruction that moves the PC and then the stack,
+    // so a record taken after the tick would show the *next* instruction's address
+    // and a spent stack.  The idle loop cannot catch this: it is a parked STOP, so
+    // the post-tick PC happens to equal the breakpoint address.
+    let mut emu = fx991::Emu::from_rom(rom_or_skip!());
+    let index = emu.breakpoint(fx991::Breakpoint::auto(0x0_946A).limit(4));
+    emu.run(20);
+
+    let hits = emu.recorded_hits(index).to_vec();
+    assert_eq!(hits.len(), 1, "the entry runs once");
+    assert_eq!(hits[0].pc, 0x0_946A, "the hit address, not the next one");
+    assert_eq!(
+        hits[0].sp, 0xF000,
+        "the reset stack pointer, before the call"
+    );
 }
 
 #[test]

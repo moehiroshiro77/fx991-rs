@@ -30,6 +30,7 @@
 //!   "collect every arrival" case with no closure at all.
 
 use fx991_chipset::{Chipset, TickOutcome};
+use nxu8_core::Regs;
 
 /// What an address means in a breakpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,8 +244,9 @@ pub struct Emu {
     /// Instructions ticked since the last reset.
     pub ticks: u64,
     breakpoints: Vec<Breakpoint>,
-    /// Indices whose breakpoint fired during the tick currently being processed.
-    pending_hits: Vec<usize>,
+    /// Hits whose breakpoint fired during the tick being processed, with the
+    /// register state captured at the moment it fired.
+    pending_hits: Vec<(usize, Hit)>,
 }
 
 impl Emu {
@@ -408,7 +410,7 @@ impl Emu {
     // -------------------------------------------------------------- stepping
     /// Execute one tick, consulting any armed breakpoints.
     pub fn step(&mut self) -> TickOutcome {
-        let mut no_extra = |_pc: u32, _bus: &mut fx991_bus::Bus| false;
+        let mut no_extra = |_pc: u32, _regs: &Regs, _bus: &mut fx991_bus::Bus| false;
         self.step_with_bus(&mut no_extra)
     }
 
@@ -418,11 +420,11 @@ impl Emu {
     /// accumulation possible without a `'static` bound.  Returning `true` suppresses
     /// the instruction -- see [`Mode::Stop`].
     pub fn step_with(&mut self, hook: &mut dyn FnMut(u32) -> bool) -> TickOutcome {
-        let mut adapter = |pc: u32, _bus: &mut fx991_bus::Bus| hook(pc);
+        let mut adapter = |pc: u32, _regs: &Regs, _bus: &mut fx991_bus::Bus| hook(pc);
         self.step_with_bus(&mut adapter)
     }
 
-    /// [`Emu::step_with`], with the bus visible to the hook as well.
+    /// [`Emu::step_with`], with the registers and the bus visible to the hook.
     ///
     /// A debugger needs the bus here: a conditional breakpoint on `[0xD180] == 0xFF`
     /// has to read the data space *before* the instruction runs, and re-running the
@@ -430,7 +432,7 @@ impl Emu {
     /// advances the timer divider.
     pub fn step_with_bus(
         &mut self,
-        hook: &mut dyn FnMut(u32, &mut fx991_bus::Bus) -> bool,
+        hook: &mut dyn FnMut(u32, &Regs, &mut fx991_bus::Bus) -> bool,
     ) -> TickOutcome {
         let tick = self.ticks + 1;
         self.pending_hits.clear();
@@ -438,7 +440,7 @@ impl Emu {
         let outcome = {
             let breakpoints = &mut self.breakpoints;
             let pending = &mut self.pending_hits;
-            let mut combined = |pc: u32, bus: &mut fx991_bus::Bus| -> bool {
+            let mut combined = |pc: u32, regs: &Regs, bus: &mut fx991_bus::Bus| -> bool {
                 let mut stop = false;
                 for (index, bp) in breakpoints.iter_mut().enumerate() {
                     if !bp.enabled || !bp.matches(pc) {
@@ -451,9 +453,20 @@ impl Emu {
                         stop = true;
                     }
                     bp.bump();
-                    pending.push(index);
+                    // The registers describe the instruction about to run here and
+                    // nowhere later, so the hit is recorded now rather than after
+                    // the tick.
+                    pending.push((
+                        index,
+                        Hit {
+                            tick,
+                            pc,
+                            sp: regs.sp,
+                            er0: regs.er(0),
+                        },
+                    ));
                 }
-                let caller_stop = hook(pc, bus);
+                let caller_stop = hook(pc, regs, bus);
                 stop || caller_stop
             };
             self.chipset.tick(Some(&mut combined))
@@ -461,15 +474,8 @@ impl Emu {
 
         self.ticks = tick;
 
-        // Record the hits now that the chipset borrow is over.
-        let pending = std::mem::take(&mut self.pending_hits);
-        for index in pending {
-            let snapshot = Hit {
-                tick,
-                pc: self.chipset.cpu.regs.physical_pc(),
-                sp: self.chipset.cpu.regs.sp,
-                er0: self.chipset.cpu.regs.er(0),
-            };
+        // File the hits now that the chipset borrow is over.
+        for (index, snapshot) in std::mem::take(&mut self.pending_hits) {
             let bp = &mut self.breakpoints[index];
             if bp.recorded.len() < bp.hit_limit {
                 bp.recorded.push(snapshot);
