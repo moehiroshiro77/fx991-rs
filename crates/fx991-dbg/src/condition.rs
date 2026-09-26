@@ -312,12 +312,18 @@ impl Expr {
     }
 }
 
+/// Read a register's current value.
+///
+/// The indices are used as given: [`parse_register`] is the only constructor of
+/// these variants and it range-checks every one, so masking here would hide the
+/// invariant rather than enforce it -- and the mask would silently read a
+/// different register if that check were ever loosened.
 fn read_register(regs: &Regs, reg: Reg) -> u64 {
     match reg {
-        Reg::Byte(index) => regs.r[(index & 0xF) as usize] as u64,
-        Reg::Word(index) => regs.er((index & 0xE) as usize) as u64,
-        Reg::Xr(index) => regs.xr((index & 0xC) as usize) as u64,
-        Reg::Qr(index) => regs.reg((index & 0x8) as usize, 8),
+        Reg::Byte(index) => regs.r[index as usize] as u64,
+        Reg::Word(index) => regs.er(index as usize) as u64,
+        Reg::Xr(index) => regs.xr(index as usize) as u64,
+        Reg::Qr(index) => regs.reg(index as usize, 8),
         Reg::Sp => regs.sp as u64,
         Reg::Pc => regs.physical_pc() as u64,
         Reg::Csr => regs.csr as u64,
@@ -342,15 +348,21 @@ fn read_register(regs: &Regs, reg: Reg) -> u64 {
 }
 
 /// Look up a register by name, or `None` when the name is not one.
+///
+/// An index outside the register file is rejected rather than accepted and masked
+/// later: `er20` is a typo for `er2` or `er0`, and reading it as `ER4` -- which is
+/// what masking the low bits does -- would silently watch the wrong register.  The
+/// command layer's `set`/`get` already refuse those names, so accepting them here
+/// would also make the two disagree.
 pub fn parse_register(name: &str) -> Option<Reg> {
     if let Some(index) = index_suffix(name, "qr") {
-        return (index % 8 == 0).then_some(Reg::Qr(index));
+        return (index < 16 && index % 8 == 0).then_some(Reg::Qr(index));
     }
     if let Some(index) = index_suffix(name, "xr") {
-        return (index % 4 == 0).then_some(Reg::Xr(index));
+        return (index < 16 && index % 4 == 0).then_some(Reg::Xr(index));
     }
     if let Some(index) = index_suffix(name, "er") {
-        return (index % 2 == 0).then_some(Reg::Word(index));
+        return (index < 16 && index % 2 == 0).then_some(Reg::Word(index));
     }
     if let Some(index) = index_suffix(name, "r") {
         return (index < 16).then_some(Reg::Byte(index));
@@ -801,6 +813,27 @@ mod tests {
             "XR names are multiples of four"
         );
         assert_eq!(parse_register("qr4"), None, "QR names are 0 or 8");
+    }
+
+    #[test]
+    fn a_register_index_past_the_file_is_rejected_not_wrapped() {
+        // `er20` is past the sixteen byte registers.  The register file's accessors
+        // mask their index, so accepting the name would silently read `ER4` -- the
+        // low bits of twenty -- and a typo would watch the wrong register.
+        for name in ["r16", "r32", "er16", "er20", "er32", "xr16", "qr16"] {
+            assert_eq!(parse_register(name), None, "{name} is not a register");
+            // And a condition says so rather than picking some other register.
+            assert!(
+                Expr::parse(&format!("{name} == 0")).is_err(),
+                "{name} should not parse"
+            );
+        }
+        // The highest valid index of each width still works, so the check is a bound
+        // and not an off-by-one.
+        assert_eq!(parse_register("r15"), Some(Reg::Byte(15)));
+        assert_eq!(parse_register("er14"), Some(Reg::Word(14)));
+        assert_eq!(parse_register("xr12"), Some(Reg::Xr(12)));
+        assert_eq!(parse_register("qr8"), Some(Reg::Qr(8)));
     }
 
     #[test]
