@@ -189,10 +189,10 @@ impl Patcher {
         bytes: &[u8],
         source: impl Into<String>,
     ) -> Result<Patch, PatchError> {
-        if address % 2 != 0 {
+        if !address.is_multiple_of(2) {
             return Err(PatchError::UnalignedAddress(address));
         }
-        if bytes.len() % 2 != 0 || bytes.is_empty() {
+        if !bytes.len().is_multiple_of(2) || bytes.is_empty() {
             return Err(PatchError::OddLength(bytes.len()));
         }
         if address as usize + bytes.len() > 0x100_0000 {
@@ -413,7 +413,7 @@ fn register_index_er(text: &str) -> Option<u8> {
         .or_else(|| text.strip_prefix("Er"))
         .or_else(|| text.strip_prefix("eR"))?;
     let index: u8 = rest.parse().ok()?;
-    (index < 16 && index % 2 == 0).then_some(index)
+    (index < 16 && index.is_multiple_of(2)).then_some(index)
 }
 
 fn is_immediate(text: &str) -> bool {

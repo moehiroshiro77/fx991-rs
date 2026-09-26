@@ -8,10 +8,11 @@ license.workspace = true
 
 [dev-dependencies]
 testkit = { workspace = true }
+# Only the integration tests assemble instructions; the library itself never does.
+nxu8-asm = { workspace = true }
 
 [dependencies]
 fx991-model = { workspace = true }
 fx991-chipset = { workspace = true }
 fx991-bus = { workspace = true }
 nxu8-core = { workspace = true }
-nxu8-asm = { workspace = true }

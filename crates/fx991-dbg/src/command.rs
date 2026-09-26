@@ -1076,7 +1076,7 @@ fn parse_bytes(text: &str) -> Result<Vec<u8>> {
     if cleaned.is_empty() {
         return Err(CommandError::new("no bytes given"));
     }
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(CommandError::new(format!(
             "{} hex digits is an odd count; bytes need two each",
             cleaned.len()

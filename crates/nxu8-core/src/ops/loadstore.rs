@@ -40,7 +40,7 @@ fn bump_ea(cpu: &mut Cpu, value_size: usize) {
 
 fn load_store<B: Memory>(cpu: &mut Cpu, bus: &mut B, offset: u16, length: usize) {
     let mut offset = offset;
-    if length % 2 == 0 {
+    if length.is_multiple_of(2) {
         offset &= !1;
     }
 

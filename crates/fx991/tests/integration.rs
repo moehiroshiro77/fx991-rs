@@ -692,7 +692,7 @@ fn trigger_prefix(n: usize) -> Vec<u8> {
     } else {
         let mut v = vec![0x31; 100];
         v.push(0xA6); // "+"
-        v.extend(std::iter::repeat(0x31).take(n - 101));
+        v.extend(std::iter::repeat_n(0x31, n - 101));
         v
     }
 }

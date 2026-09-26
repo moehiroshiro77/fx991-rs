@@ -33,8 +33,9 @@ fx991-chipset = { path = "crates/fx991-chipset" }
 fx991 = { path = "crates/fx991" }
 fx991-ui = { path = "crates/fx991-ui" }
 fx991-dbg = { path = "crates/fx991-dbg" }
-fx991-app = { path = "crates/fx991-app" }
 testkit = { path = "crates/testkit" }
+# `fx991-app` is deliberately absent: it is a binary crate at the top of the
+# graph, so nothing depends on it and there is no entry to share.
 
 # Zero third-party dependencies, deliberately: the emulator only needs the
 # standard library, and a self-contained build keeps the research reproducible
