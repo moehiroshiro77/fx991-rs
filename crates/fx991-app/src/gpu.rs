@@ -66,9 +66,19 @@ impl std::error::Error for DrawError {}
 ///
 /// Vulkan comes first because opening it is by far the cheapest: its instance
 /// and swapchain together account for a fraction of what the other backends
-/// cost, and nothing this window does benefits from the difference.  `PRIMARY`
-/// is the fallback, so a machine with no Vulkan driver still gets a window.
-const BACKEND_PREFERENCE: [wgpu::Backends; 2] = [wgpu::Backends::VULKAN, wgpu::Backends::PRIMARY];
+/// cost, and nothing this window does benefits from the difference.
+///
+/// `GL` is listed separately because `PRIMARY` does not contain it: `PRIMARY` is
+/// Vulkan, Metal, DX12 and WebGPU, and GL is the second-tier set on its own.  A
+/// Linux machine with no Vulkan driver -- an older card, a software-only Mesa
+/// install, some containers and remote desktops -- reaches wgpu through GL and
+/// nothing else, so leaving it out would turn a working window into a startup
+/// failure.
+const BACKEND_PREFERENCE: [wgpu::Backends; 3] = [
+    wgpu::Backends::VULKAN,
+    wgpu::Backends::PRIMARY,
+    wgpu::Backends::GL,
+];
 
 /// Open a surface and an adapter, trying each backend in preference order.
 ///
@@ -270,8 +280,8 @@ impl Gpu {
     /// surface that needs reconfiguring.  Neither is an error: the caller just
     /// skips the frame.  `Err` is reserved for an unusable device.
     pub fn draw(&mut self, frame: &fx991_ui::Frame) -> Result<Option<SurfaceProblem>, DrawError> {
-        // `write_texture` needs no 256-byte row padding (verified in
-        //), so the frame goes up as-is.
+        // `write_texture` needs no 256-byte row padding, so the frame goes up
+        // as-is.
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
