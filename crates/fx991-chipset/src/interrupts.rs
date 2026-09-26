@@ -144,8 +144,21 @@ impl Interrupts {
     }
 
     /// Latch the pending bit for a source.
+    ///
+    /// `0xF014` reports only the thirteen managed bits, so an index outside that
+    /// range has no bit to latch.  The check mirrors [`Interrupts::enabled`] and
+    /// [`Interrupts::is_pending`] rather than subtracting first: a source below the
+    /// managed range would otherwise underflow the shift, which is a panic in a
+    /// debug build.
     pub fn set_pending(&mut self, index: usize) {
-        self.pending |= 1 << (index - MANAGED_INTERRUPT_BASE);
+        if index < MANAGED_INTERRUPT_BASE {
+            return;
+        }
+        let bit = index - MANAGED_INTERRUPT_BASE;
+        if bit >= MANAGED_INTERRUPT_AMOUNT {
+            return;
+        }
+        self.pending |= 1 << bit;
         self.pending &= INTERRUPT_BITFIELD_MASK;
     }
 
@@ -337,5 +350,25 @@ mod tests {
         ints.pending = 0xFFFF;
         ints.set_pending(TIMER_INTERRUPT);
         assert_eq!(ints.pending, 0x1FFF);
+    }
+
+    #[test]
+    fn latching_a_source_outside_the_bitfield_is_a_no_op() {
+        // `0xF014` has thirteen managed bits, so a source outside them has no bit
+        // to latch.  Taking the shift anyway would underflow for anything below the
+        // managed range, which is a panic in a debug build -- and this method is the
+        // public one the rest of the machine calls.
+        let mut ints = Interrupts::new();
+        for index in [0, 1, 2, 3, INT_RESET, INT_BREAK] {
+            ints.set_pending(index);
+            assert_eq!(ints.pending, 0, "index {index} has no managed bit");
+        }
+        // And one past the top of the field, likewise.
+        ints.set_pending(MANAGED_INTERRUPT_BASE + MANAGED_INTERRUPT_AMOUNT);
+        assert_eq!(ints.pending, 0);
+
+        // The managed range still latches, so the guard is a bound and not a mute.
+        ints.set_pending(TIMER_INTERRUPT);
+        assert_ne!(ints.pending, 0, "the timer source is managed");
     }
 }

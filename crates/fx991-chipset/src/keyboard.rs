@@ -47,6 +47,15 @@ pub const MISC_F048: u32 = 0x0_F048;
 /// `0xF220`, a 4-byte "unknown" block from.
 pub const MISC_F220: u32 = 0x0_F220;
 
+/// The bit a matrix line is selected by.
+///
+/// A coordinate is one nibble of the code, and the bit is stored in a `u8`, so the
+/// usable range is `0..8` -- a nibble of eight or more has no bit that fits.
+/// `KO`/`KI` are sixteen-bit registers of which ten bits are used, so a hand-written
+/// code could name a line this model cannot represent; the model's own codes stop
+/// at `0x64`, whose nibbles are six and four.
+pub const MATRIX_LINE_BITS: u8 = 8;
+
 /// The 6-bit button index for a matrix code.
 pub fn button_index(code: u8) -> usize {
     if code == 0xFF {
@@ -55,12 +64,23 @@ pub fn button_index(code: u8) -> usize {
     (((code >> 1) & 0x38) | (code & 0x07)) as usize
 }
 
-/// The two matrix lines a code addresses.
-pub fn matrix_bits(code: u8) -> (u8, u8) {
+/// The two matrix lines a code addresses, as `(KO bit, KI bit)`.
+///
+/// Returns `None` for a code outside the matrix.  Each coordinate is one nibble of
+/// the code and becomes one bit of a `u8`, so a nibble of eight or more has no bit
+/// that fits: shifting one into place would overflow -- a panic in a debug build,
+/// and a silently wrong line in a release one.  The model's codes stop at `0x64`,
+/// but this is a public entry point and a hand-written code can be anything.
+pub fn matrix_bits(code: u8) -> Option<(u8, u8)> {
     if code == 0xFF {
-        return (0, 0);
+        // The "no key" sentinel, which is not a coordinate.
+        return Some((0, 0));
     }
-    (1 << ((code >> 4) & 0xF), 1 << (code & 0xF))
+    let (ko, ki) = (code >> 4, code & 0xF);
+    if ko >= MATRIX_LINE_BITS || ki >= MATRIX_LINE_BITS {
+        return None;
+    }
+    Some((1 << ko, 1 << ki))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -177,7 +197,11 @@ impl Keyboard {
             if buttons[index].present {
                 continue;
             }
-            let (ko_bit, ki_bit) = matrix_bits(key.code);
+            // A code outside the matrix has no bits to press; the model does not
+            // define one, so it can only be skipped rather than pressed.
+            let Some((ko_bit, ki_bit)) = matrix_bits(key.code) else {
+                continue;
+            };
             buttons[index] = Button {
                 present: true,
                 is_power: key.code == 0xFF,
@@ -644,7 +668,31 @@ mod tests {
     fn the_power_key_is_flagged_and_has_no_matrix_bits() {
         let kb = Keyboard::new();
         assert!(kb.is_power_key(0xFF));
-        assert_eq!(matrix_bits(0xFF), (0, 0));
+        assert_eq!(matrix_bits(0xFF), Some((0, 0)));
         assert_eq!(button_index(0xFF), 63);
+    }
+
+    #[test]
+    fn a_code_outside_the_matrix_has_no_bits() {
+        // Each coordinate becomes one bit of a `u8`, so a nibble of eight or more
+        // has no bit that fits: shifting one into place is the overflow this bound
+        // prevents.
+        assert_eq!(matrix_bits(0x00), Some((1, 1)), "the first key");
+        assert_eq!(matrix_bits(0x77), Some((0x80, 0x80)), "the highest line");
+        for code in [0x08, 0x80, 0xA0, 0xC0, 0xF0, 0x1A] {
+            assert_eq!(matrix_bits(code), None, "{code:#04X} is off the matrix");
+        }
+        // A real code still resolves to the two lines its nibbles name.
+        assert_eq!(matrix_bits(0x32), Some((1 << 3, 1 << 2)));
+        // And every code the model defines is inside the matrix, so the guard never
+        // silently drops a real key when the table is built.
+        for key in fx991_model::KeyTable::new().keys() {
+            assert!(
+                matrix_bits(key.code).is_some(),
+                "model code {:#04X} ({}) is off the matrix",
+                key.code,
+                key.name
+            );
+        }
     }
 }
