@@ -564,7 +564,7 @@ mod tests {
                     || BUTTONS.iter().position(|b| b.code == hit.code)
                         < BUTTONS.iter().position(|b| b.code == button.code),
                 "button {:?} at ({cx},{cy}) is shadowed by a later one",
-                button.lua_name
+                button.label
             );
         }
     }

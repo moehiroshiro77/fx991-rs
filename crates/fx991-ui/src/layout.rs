@@ -27,14 +27,15 @@ pub struct Button {
     pub h: u16,
     /// The matrix code the key scan sees.
     pub code: u8,
-    /// 's SDL name.  **Positional, not semantic** -- several
-    /// are wrong; use it for debugging only.
-    pub lua_name: &'static str,
+    /// A short label for diagnostics.  **Positional, not semantic** -- it
+    /// names the button's place on the face, and several are misleading.
+    pub label: &'static str,
 }
 
 /// A sprite's source rectangle in the skin and where it lands on screen.
 ///
-/// The destination size always equals the source size; sprites are never scaled.
+/// The destination size always equals the source size -- the reference
+/// implementation never scales a sprite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sprite {
     pub src_x: u16,
@@ -80,9 +81,9 @@ pub const SKIN_SOURCE_H: u32 = 615;
 
 /// The 1x1 ink stamp every dot and indicator is drawn with.
 ///
-/// Its source pixel is inside the LCD area, which is a single flat colour, so
-/// this is an opaque ink *stamp*, not a two-state sprite: the ink is modulated
-/// per pixel by the alpha.
+/// Its source pixel is inside the LCD area, which is a single flat colour
+/// in the source image, so this is an opaque ink *stamp*, not a
+/// two-state sprite: the ink is modulated per pixel by the alpha.
 pub const PIXEL_STAMP: Sprite = Sprite {
     src_x: 47,
     src_y: 112,
@@ -94,13 +95,14 @@ pub const PIXEL_STAMP: Sprite = Sprite {
 
 /// The ink colour, multiplied into the stamp's pixels.
 ///
-/// The rendered colour is `skin_pixel * INK / 255`, **not** `INK` itself.
+/// The rendered colour is `skin_pixel * INK / 255`, **not** `INK` itself,
+/// by the alpha, never written directly.
 pub const INK: (u8, u8, u8) = (30, 52, 90);
 
 /// The dot-matrix origin: where `rsd_pixel`'s destination sits.
 pub const DOTMATRIX_ORIGIN: (u16, u16) = (47, 112);
 
-/// The indicators, in draw order.
+/// The indicators, in the order they are drawn.
 pub const INDICATORS: &[Indicator] = &[
     Indicator {
         name: "rsd_s",
@@ -364,11 +366,11 @@ pub const INDICATORS: &[Indicator] = &[
     },
 ];
 
-/// The 50 buttons, in  order.
+/// The 50 buttons, in the order the face's geometry lists them.
 ///
 /// Hit testing takes the **first** match in this order and stops, so
 /// overlapping boxes resolve to the earlier entry
-/// (; the interval is half-open on the far edge).
+/// (the interval is half-open on the far edge).
 pub const BUTTONS: &[Button] = &[
     Button {
         x: 29,
@@ -376,7 +378,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x02,
-        lua_name: "7",
+        label: "7",
     },
     Button {
         x: 76,
@@ -384,7 +386,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x12,
-        lua_name: "8",
+        label: "8",
     },
     Button {
         x: 123,
@@ -392,7 +394,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x22,
-        lua_name: "9",
+        label: "9",
     },
     Button {
         x: 170,
@@ -400,7 +402,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x32,
-        lua_name: "Backspace",
+        label: "Backspace",
     },
     Button {
         x: 217,
@@ -408,7 +410,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x42,
-        lua_name: "Space",
+        label: "Space",
     },
     Button {
         x: 29,
@@ -416,7 +418,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x01,
-        lua_name: "4",
+        label: "4",
     },
     Button {
         x: 76,
@@ -424,7 +426,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x11,
-        lua_name: "5",
+        label: "5",
     },
     Button {
         x: 123,
@@ -432,7 +434,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x21,
-        lua_name: "6",
+        label: "6",
     },
     Button {
         x: 170,
@@ -440,7 +442,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x31,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 217,
@@ -448,7 +450,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x41,
-        lua_name: "/",
+        label: "/",
     },
     Button {
         x: 29,
@@ -456,7 +458,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x00,
-        lua_name: "1",
+        label: "1",
     },
     Button {
         x: 76,
@@ -464,7 +466,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x10,
-        lua_name: "2",
+        label: "2",
     },
     Button {
         x: 123,
@@ -472,7 +474,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x20,
-        lua_name: "3",
+        label: "3",
     },
     Button {
         x: 170,
@@ -480,7 +482,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x30,
-        lua_name: "=",
+        label: "=",
     },
     Button {
         x: 217,
@@ -488,7 +490,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x40,
-        lua_name: "-",
+        label: "-",
     },
     Button {
         x: 29,
@@ -496,7 +498,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x64,
-        lua_name: "0",
+        label: "0",
     },
     Button {
         x: 76,
@@ -504,7 +506,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x63,
-        lua_name: ".",
+        label: ".",
     },
     Button {
         x: 123,
@@ -512,7 +514,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x62,
-        lua_name: "E",
+        label: "E",
     },
     Button {
         x: 170,
@@ -520,7 +522,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x61,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 217,
@@ -528,7 +530,7 @@ pub const BUTTONS: &[Button] = &[
         w: 41,
         h: 29,
         code: 0x60,
-        lua_name: "Return",
+        label: "Return",
     },
     Button {
         x: 29,
@@ -536,7 +538,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x05,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 67,
@@ -544,7 +546,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x15,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 105,
@@ -552,7 +554,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x25,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 143,
@@ -560,7 +562,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x35,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 181,
@@ -568,7 +570,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x45,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 219,
@@ -576,7 +578,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x55,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 29,
@@ -584,7 +586,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x04,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 67,
@@ -592,7 +594,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x14,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 105,
@@ -600,7 +602,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x24,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 143,
@@ -608,7 +610,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x34,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 181,
@@ -616,7 +618,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x44,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 219,
@@ -624,7 +626,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x54,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 29,
@@ -632,7 +634,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x03,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 67,
@@ -640,7 +642,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x13,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 105,
@@ -648,7 +650,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x23,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 143,
@@ -656,7 +658,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x33,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 181,
@@ -664,7 +666,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x43,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 219,
@@ -672,7 +674,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x53,
-        lua_name: "",
+        label: "",
     },
     Button {
         x: 29,
@@ -680,7 +682,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x06,
-        lua_name: "F5",
+        label: "F5",
     },
     Button {
         x: 67,
@@ -688,7 +690,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x16,
-        lua_name: "F6",
+        label: "F6",
     },
     Button {
         x: 181,
@@ -696,7 +698,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x46,
-        lua_name: "F7",
+        label: "F7",
     },
     Button {
         x: 219,
@@ -704,7 +706,7 @@ pub const BUTTONS: &[Button] = &[
         w: 33,
         h: 20,
         code: 0x56,
-        lua_name: "F8",
+        label: "F8",
     },
     Button {
         x: 29,
@@ -712,7 +714,7 @@ pub const BUTTONS: &[Button] = &[
         w: 28,
         h: 28,
         code: 0x07,
-        lua_name: "F1",
+        label: "F1",
     },
     Button {
         x: 64,
@@ -720,7 +722,7 @@ pub const BUTTONS: &[Button] = &[
         w: 28,
         h: 28,
         code: 0x17,
-        lua_name: "F2",
+        label: "F2",
     },
     Button {
         x: 193,
@@ -728,7 +730,7 @@ pub const BUTTONS: &[Button] = &[
         w: 28,
         h: 28,
         code: 0x47,
-        lua_name: "F3",
+        label: "F3",
     },
     Button {
         x: 228,
@@ -736,7 +738,7 @@ pub const BUTTONS: &[Button] = &[
         w: 28,
         h: 28,
         code: 0xff,
-        lua_name: "F4",
+        label: "F4",
     },
     Button {
         x: 100,
@@ -744,7 +746,7 @@ pub const BUTTONS: &[Button] = &[
         w: 24,
         h: 26,
         code: 0x26,
-        lua_name: "Left",
+        label: "Left",
     },
     Button {
         x: 162,
@@ -752,7 +754,7 @@ pub const BUTTONS: &[Button] = &[
         w: 24,
         h: 26,
         code: 0x37,
-        lua_name: "Right",
+        label: "Right",
     },
     Button {
         x: 123,
@@ -760,7 +762,7 @@ pub const BUTTONS: &[Button] = &[
         w: 40,
         h: 23,
         code: 0x27,
-        lua_name: "Up",
+        label: "Up",
     },
     Button {
         x: 123,
@@ -768,6 +770,6 @@ pub const BUTTONS: &[Button] = &[
         w: 40,
         h: 23,
         code: 0x36,
-        lua_name: "Down",
+        label: "Down",
     },
 ];

@@ -13,7 +13,7 @@ emu dbg --boot 500000                        # run half a second of boot first
 
 ## Why it decodes memory rather than reading a listing
 
-`data/_disas_verF.txt` is *derived* data: `tools/u8dis/` generated it from a
+`data/_disas_verF.txt` is *derived* data: a separate tool generated it from a
 declarative instruction chart.  It is an excellent reference for a static pass over
 the ROM, but a debugger cannot use it, because a file on disk cannot show:
 
@@ -184,16 +184,11 @@ notes on the real ROM:
 | `scripts/selftest-entry.dbg` | SHIFT + 7 held through an ON reset enters the self-test |
 | `scripts/lbf-converter.dbg` | why the `lbf/in²>kPa` character converter works: byte `23h` terminates a history record |
 
-The first two were measured independently a second time, by a Python prototype kept
-alongside the research notes, and the two sets of results agree.
-
-The third answers a question the community ROP tutorial explicitly leaves open -- it
-says the `23` byte of `lbf/in²>kPa` "gets eaten" and defers the reason to a later
-chapter that never gives it.  The reason is that `23h` is a history record's terminator and the
-reader stops at the first one, which for `FE23` is the character's own second byte;
-the recalled text is then `31 FE 00`, and the `FE00` is what lets the cursor be
-placed inside a double-byte character.  The script shows all three cases, including
-a control where the second byte is not `23` and the recall is intact.
+The third explains the `lbf/in²>kPa` character converter: `23h` is a history
+record's terminator and the reader stops at the first one, which for `FE23` is the
+character's own second byte.  The recalled text is then `31 FE 00`, and the `FE00` is
+what lets the cursor be placed inside a double-byte character.  The script shows all
+three cases, including a control where the second byte is not `23`.
 
 It is also a worked example of the debugger earning its keep: the write side was
 found with a watchpoint on `0xD392`, the record layout by reading the bytes back, and

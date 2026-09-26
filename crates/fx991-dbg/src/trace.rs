@@ -22,7 +22,7 @@
 //! registers that instruction changed.  The register changes are computed by
 //! comparing against the previous entry, so they cost nothing extra and answer the
 //! question a trace is usually opened to answer: *which* instruction moved the
-//! value I care about.
+//! value being chased.
 //!
 //! Nothing here allocates per instruction beyond the ring slot itself, because a
 //! trace you can only afford to run occasionally is a trace that is not running

@@ -27,9 +27,9 @@
 
 use crate::decode::OpcodeSource;
 
-/// The opcode table: one row per entry of `CPU:opcode_sources[]`.
+/// The opcode table: one row per entry of `CPU::opcode_sources[]`.
 ///
-/// The row count is asserted in `decode`'s tests, so a dropped row is caught.
+/// The row count is asserted against the reference in `decode`'s tests.
 pub const OPCODE_SOURCES: &[OpcodeSource] = &[
     OpcodeSource::new("OP_ADD", 0x0040, 0x8001, (1, 0x000f, 8), (1, 0x000f, 4)),
     OpcodeSource::new("OP_ADD", 0x0040, 0x1000, (1, 0x000f, 8), (0, 0x00ff, 0)),

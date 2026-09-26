@@ -23,7 +23,7 @@
 //!
 //! Measured key table for the fx-991CN X matrix.
 //!
-//! `code` is the matrix value from the emulator's `model.lua`; `token` is the
+//! `code` is the matrix value from the emulator's own key map; `token` is the
 //! byte the ROM writes into `ram:0xD180` for that key, or `None` when the key
 //! inserts no character.  Names come from decoding the token through the
 //! table published with the VerC ROP tooling.
@@ -136,12 +136,12 @@ pub const KEYS: &[Key] = &[
     Key::new(0xff, "ON", None),
 ];
 
-/// Names as they appear in the emulator's `model.lua`.
+/// Names as they appear in the emulator's own key map.
 ///
 /// Several are wrong and it matters: the file's author picked SDL key names by
 /// screen position, not by what the key does.  It calls `0x30` `=`, for
 /// instance, but that code types token `0xA6`, which decodes as `+`.
-pub const MODEL_LUA_NAMES: &[(&str, u8)] = &[
+pub const KEYMAP_NAMES: &[(&str, u8)] = &[
     ("1", 0x00),
     ("4", 0x01),
     ("7", 0x02),
@@ -170,7 +170,7 @@ pub const MODEL_LUA_NAMES: &[(&str, u8)] = &[
     ("0", 0x64),
 ];
 
-/// The three unnamed blocks in `model.lua` order (row-major, 6 per row).
+/// The three unnamed blocks in key-map order (row-major, 6 per row).
 pub const UNNAMED_BLOCK_CODES: &[[u8; 6]] = &[
     [0x05, 0x15, 0x25, 0x35, 0x45, 0x55],
     [0x04, 0x14, 0x24, 0x34, 0x44, 0x54],

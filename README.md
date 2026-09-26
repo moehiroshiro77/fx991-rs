@@ -27,7 +27,7 @@ job -- the test suite renders all 116 943 of its instructions and requires the t
 agree, which is how the decoder is checked against an independently written one.
 
 The skin is a bare pixel buffer, row-major RGBA at 307×615 with no header. Decode
-the calculator's `interface.png` with any PNG library and write the pixels out;
+the calculator's own manual image with any PNG library and write the pixels out;
 the emulator checks the length and refuses a file of the wrong size rather than
 rendering garbage.
 
@@ -81,10 +81,10 @@ notes on the real firmware:
 | `scripts/selftest-entry.dbg` | SHIFT + 7 held through an ON reset enters the self-test |
 | `scripts/lbf-converter.dbg` | the `lbf/in²>kPa` character converter: `23h` terminates a history record |
 
-The first two are independent reimplementations of Python experiments kept alongside
-the research notes, and agree with them.  The third answers a question the ROP
-tutorial leaves open about why that particular character converts.  Full documentation, including the four
-design decisions worth knowing, is in [`docs/debugger.md`](docs/debugger.md).
+Each script asserts what it demonstrates and exits non-zero when the assertion
+fails, so they double as regression tests for the behaviours they cover.  Full
+documentation, including the four design decisions worth knowing, is in
+[`docs/debugger.md`](docs/debugger.md).
 
 ## License
 
@@ -130,7 +130,7 @@ Where this implementation differs, and why:
 | CW-II / `TIMER_SKIPPED` branches | present | omitted | only compiled for `HW_CLASSWIZ_II`, which the VerF firmware never reaches |
 | RAM mirror at `0x49800` | present on the non-hardware model | not implemented | the VerF model reports `real_hardware = 1` |
 | coprocessor `CRn` | implemented | raises `Unimplemented` | the firmware never executes one; failing loudly beats silently mis-executing |
-| display font | sprites from `interface.png` | bit-per-pixel dot matrix | enough for debugging; the UI composes the real skin |
+| display font | sprites from the manual image | bit-per-pixel dot matrix | enough for debugging; the UI composes the real skin |
 
 ### Other references
 

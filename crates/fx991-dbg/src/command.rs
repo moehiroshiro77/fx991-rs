@@ -411,14 +411,13 @@ impl Session<'_> {
             // The wait is on the accept edge (`rom:0F968`), not on a tick count.
             // That distinction is the whole point: the ROM only takes a key while
             // its input filter (`0xF042`) is armed, and it disarms again within a
-            // few hundred thousand ticks, so "hold for N ticks and hope" silently
-            // drops keys -- which is exactly the bug that made `SHIFT 8` type an
-            // `8` instead of opening the unit menu.
+            // few hundred thousand ticks.  A tick count is therefore a guess, and a
+            // wrong guess drops the key silently rather than reporting anything.
             //
-            // Waiting for the edge also makes the modifier work the way a person
-            // expects: `tap SHIFT` arms the modifier, and the ROM keeps it armed
-            // until the next key, so `tap SHIFT` followed by `tap 8` opens the menu
-            // without any of them being held.
+            // Waiting for the edge also makes a modifier work the way a person
+            // expects: `tap SHIFT` arms it, and the ROM keeps it armed until the
+            // next key, so `tap SHIFT` then `tap 8` opens the unit menu without
+            // either key being held.
             "tap" | "press" => {
                 let name = words
                     .first()
@@ -892,8 +891,8 @@ impl Session<'_> {
         // **The settle goes through the breakpoint-aware run, not a plain tick
         // loop.**  What a key press *causes* is the interesting part -- evaluating,
         // copying the input area, running a ROP chain -- so a breakpoint armed on
-        // any of that has to fire during the settle.  A plain loop stepped over it,
-        // which is why `bp 13CD2` never triggered.
+        // any of that has to fire during the settle, or it is silently skipped along
+        // with the instructions.
         let stopped = self.run_settle(settle);
         self.emu.chipset.keyboard.borrow_mut().release(Some(code));
         let after = self.run_settle(settle);

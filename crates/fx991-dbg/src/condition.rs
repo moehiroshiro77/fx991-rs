@@ -61,7 +61,7 @@ use nxu8_core::Regs;
 ///
 /// Kept short and lowercase on purpose: these are meant to be typed.
 pub const SYMBOLS: &[(&str, u32)] = &[
-    // The RAM areas the research notes care about.
+    // The RAM areas worth naming, because they are what a condition reads.
     ("input", fx991_model::address::INPUT_BUFFER),
     ("replay", fx991_model::address::REPLAY_BUFFER),
     ("random", fx991_model::address::RANDOM_SEED),

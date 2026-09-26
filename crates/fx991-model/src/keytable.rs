@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use crate::keys::{KEYS, MODEL_LUA_NAMES, UNNAMED_BLOCK_CODES};
+use crate::keys::{KEYMAP_NAMES, KEYS, UNNAMED_BLOCK_CODES};
 
 /// One button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,16 +83,15 @@ impl KeyTable {
         }
         // 's names fill gaps but never override a measured name, so
         // `press("=")` still resolves -- to 0x30, which is `+`.
-        for (name, code) in MODEL_LUA_NAMES {
+        for (name, code) in KEYMAP_NAMES {
             if by_code.contains_key(code) {
                 by_name.entry((*name).to_string()).or_insert(*code);
             }
         }
         by_name.entry("Enter".to_string()).or_insert(0x60);
         by_name.entry("POWER".to_string()).or_insert(0xFF);
-        // `1/x` and `pow` used to be aliases for 0x04 and 0x05 under those keys'
-        // old, wrong names.  The keys are `(-)` and `fraction`, so the aliases now
-        // name different keys: `x^-1` is 0x24 and `x^2` is 0x25.
+        // `1/x` and `pow` would resolve to `(-)` and `fraction`, which are not the
+        // keys those names describe: the reciprocal is 0x24 and the square is 0x25.
         by_name.entry("reciprocal".to_string()).or_insert(0x24);
         by_name.entry("square".to_string()).or_insert(0x25);
         by_name.entry("power".to_string()).or_insert(0x35);
@@ -206,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn model_lua_names_still_resolve() {
+    fn keymap_names_still_resolve() {
         let table = KeyTable::new();
-        for (name, code) in MODEL_LUA_NAMES {
+        for (name, code) in KEYMAP_NAMES {
             assert_eq!(
                 table.by_name(name).map(|key| key.code),
                 Some(*code),

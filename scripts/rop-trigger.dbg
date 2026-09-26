@@ -1,8 +1,7 @@
 # Reproduce the M5 ROP trigger measurement with the debugger.
 #
-# The claim was measured twice: once by a Python prototype kept with the research
-# notes, and once here, driven from the debugger's own command language.  The two
-# share no code, so their agreeing is evidence rather than a tautology.
+# Every assertion below is checked, and the script exits non-zero if one fails, so
+# it is a regression test as much as a demonstration.
 #
 # The claim:
 #
