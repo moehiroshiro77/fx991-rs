@@ -62,6 +62,53 @@ impl std::fmt::Display for DrawError {
 
 impl std::error::Error for DrawError {}
 
+/// The backends to try, in order, until one yields an adapter.
+///
+/// Vulkan comes first because opening it is by far the cheapest: its instance
+/// and swapchain together account for a fraction of what the other backends
+/// cost, and nothing this window does benefits from the difference.  `PRIMARY`
+/// is the fallback, so a machine with no Vulkan driver still gets a window.
+const BACKEND_PREFERENCE: [wgpu::Backends; 2] = [wgpu::Backends::VULKAN, wgpu::Backends::PRIMARY];
+
+/// Open a surface and an adapter, trying each backend in preference order.
+///
+/// The surface is created from the instance that produced the adapter, so the
+/// two cannot be paired up by the caller after the fact.  The instance is not
+/// returned: every handle it creates keeps its backend alive on its own.
+///
+/// A backend that cannot offer a surface is treated the same as one that cannot
+/// offer an adapter -- the loop moves on -- because both are exactly what the
+/// fallback exists for.  Only the last backend's failure is reported.
+fn open_surface_and_adapter(
+    window: &Arc<Window>,
+) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), Box<dyn std::error::Error>> {
+    let mut last_error = None;
+    for backends in BACKEND_PREFERENCE {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = backends;
+        let instance = wgpu::Instance::new(desc);
+        let surface = match instance.create_surface(window.clone()) {
+            Ok(surface) => surface,
+            Err(err) => {
+                last_error = Some(err.to_string());
+                continue;
+            }
+        };
+        match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        })) {
+            Ok(adapter) => return Ok((surface, adapter)),
+            Err(err) => last_error = Some(err.to_string()),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| "no backend offered an adapter".to_string())
+        .into())
+}
+
 /// The GPU side: a surface, a pipeline, and one texture we overwrite per frame.
 pub struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -88,14 +135,7 @@ pub struct Gpu {
 impl Gpu {
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance.create_surface(window)?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))?;
+        let (surface, adapter) = open_surface_and_adapter(&window)?;
         // Ask for the adapter's own limits, not `downlevel_defaults`.
         //
         // `downlevel_defaults` is a WebGL-compatible baseline that pins
@@ -109,7 +149,11 @@ impl Gpu {
                 label: Some("fx991"),
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
-                memory_hints: wgpu::MemoryHints::default(),
+                // `Performance` (the default) lets the driver sub-allocate
+                // resources into large blocks.  This window holds one small
+                // texture, so that strategy buys nothing and commits a great
+                // deal of memory; `MemoryUsage` keeps the blocks small.
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
             }))?;
 
@@ -123,9 +167,18 @@ impl Gpu {
             max_texture_dimension
         );
 
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or("the adapter cannot present to this surface")?;
+        // A queued (vsync) swapchain costs many times the driver memory of an
+        // immediate one, and a queue only helps a producer that runs ahead of
+        // the display.  This window redraws solely when the guest's screen
+        // changes, which is far slower than a refresh, so the queue would sit
+        // empty while still being paid for.
+        //
+        // `AutoNoVsync` resolves to `Immediate`, else `Mailbox`, else `Fifo`,
+        // so it is valid on every platform.
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
         surface.configure(&device, &config);
 
         let texture = create_frame_texture(&device, NATURAL_WIDTH, NATURAL_HEIGHT);
