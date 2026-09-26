@@ -44,6 +44,7 @@
 
 use fx991::{Emu, EmuSnapshot};
 use fx991_chipset::TickOutcome;
+use nxu8_asm::disasm::Insn;
 
 use crate::breakpoint::{Breakpoint, BreakpointId, Watch, WatchId, WatchKind};
 use crate::condition::{Context, Expr};
@@ -743,6 +744,23 @@ impl Debugger {
     pub fn disassemble(&mut self, emu: &mut Emu, address: u32, count: usize) -> String {
         let mut read = |at: u32| emu.chipset.bus.read_code_quiet(at);
         nxu8_asm::disasm::disassemble(&mut read, address, count)
+    }
+
+    /// The same disassembly, as structured instructions rather than text.
+    ///
+    /// A caller that needs each line's address -- to mark the current PC, say --
+    /// wants this rather than splitting [`Debugger::disassemble`]'s output back
+    /// apart, which cannot tell where the address field ends.
+    pub fn disassemble_insns(&mut self, emu: &mut Emu, address: u32, count: usize) -> Vec<Insn> {
+        let mut read = |at: u32| emu.chipset.bus.read_code_quiet(at);
+        let mut out = Vec::with_capacity(count);
+        let mut pc = address & !1;
+        for _ in 0..count {
+            let insn = nxu8_asm::disasm::disassemble_one(&mut read, pc);
+            pc += insn.length as u32;
+            out.push(insn);
+        }
+        out
     }
 }
 

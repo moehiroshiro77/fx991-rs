@@ -36,24 +36,25 @@ use fx991::Emu;
 
 use crate::session::Debugger;
 
-/// The width of the mnemonic column in the disassembly view.
-const TEXT_WIDTH: usize = 8;
-
 /// Render `count` instructions from `address`, with the PC marked.
 ///
 /// The current instruction is marked `>` so the view can be read at a glance; a
 /// `DSR<-` prefix and the instruction it applies to are shown as two lines with the
 /// second indented, because that is what the bytes say and what the CPU treats as
 /// one step.
+///
+/// The lines are built from [`Insn`]s rather than by re-reading the rendered
+/// listing: the address field widens past six digits above `0xFFFFFF`, and
+/// slicing a fixed six characters off the front would then eat a digit and
+/// misplace the marker.
 pub fn disassembly(debugger: &mut Debugger, emu: &mut Emu, address: u32, count: usize) -> String {
     let pc = emu.pc();
-    let text = debugger.disassemble(emu, address, count);
+    let insns = debugger.disassemble_insns(emu, address, count);
     let mut out = String::new();
-    for line in text.lines() {
-        let line_address = u32::from_str_radix(&line[..6], 16).unwrap_or(0);
-        let marker = if line_address == pc { '>' } else { ' ' };
+    for insn in &insns {
+        let marker = if insn.address == pc { '>' } else { ' ' };
         out.push(marker);
-        out.push_str(&line[1..]);
+        out.push_str(&insn.listing_line());
         out.push('\n');
     }
     out
@@ -277,7 +278,6 @@ fn code_slot_text(emu: &mut Emu, target: u32) -> Option<String> {
     if insn.is_unknown() {
         return None;
     }
-    let _ = TEXT_WIDTH;
     Some(insn.text)
 }
 
@@ -622,6 +622,31 @@ mod tests {
         assert!(lines[0].starts_with('>'), "PC is here: {:?}", lines[0]);
         assert!(lines[1].starts_with(' '), "and not here: {:?}", lines[1]);
         assert!(lines[0].contains("MOV"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn the_disassembly_keeps_the_whole_address_above_six_digits() {
+        // The address field widens to seven digits past 0xFFFFFF, and the bus is
+        // 24-bit, so this is reachable.  Slicing a fixed six characters off the
+        // front would drop the leading digit and shift every line by one column.
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
+        let text = disassembly(&mut debugger, &mut emu, 0x100_0000, 2);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        for (index, line) in lines.iter().enumerate() {
+            // One marker column, then the address: `1000000`, `1000002`.
+            let expected = format!(" {:06X}", 0x100_0000 + index * 2);
+            assert!(
+                line.starts_with(&expected),
+                "line {index} should start {expected:?}: {line:?}"
+            );
+        }
+        // The PC is not in this window, so nothing is marked.
+        assert!(
+            lines.iter().all(|line| line.starts_with(' ')),
+            "no line should be marked: {text:?}"
+        );
     }
 
     #[test]
