@@ -130,6 +130,14 @@ pub const DEFAULT_SETTLE_TICKS: u64 = 120_000;
 /// Kept for the places that only need a short run, so the intent reads clearly.
 pub const DEFAULT_TAP_TICKS: u64 = DEFAULT_SETTLE_TICKS;
 
+/// The most bytes one command will read, write or render at once.
+///
+/// A length typed at a prompt is otherwise unbounded: `m D180 4294967295` would
+/// build a four-gigabyte string before printing anything.  A megabyte is far more
+/// than any view shows and still a bounded amount of work, so a typo costs a
+/// second rather than the machine.
+pub const MAX_LENGTH: usize = 0x10_0000;
+
 /// Everything a command needs to act on.
 pub struct Session<'a> {
     /// The machine.
@@ -264,7 +272,10 @@ impl Session<'_> {
             // --------------------------------------------------------------- memory
             "m" | "mem" | "dump" => {
                 let address = self.address(&words, 0, "m wants an address")?;
-                let length = self.optional_number(&words, 1, "m")?.unwrap_or(0x40) as usize;
+                let length = match words.get(1) {
+                    Some(_) => self.bounded_length(&words, 1, "m")?,
+                    None => 0x40,
+                };
                 Ok(CommandResult::Output(view::memory(
                     self.emu, address, length,
                 )))
@@ -285,7 +296,10 @@ impl Session<'_> {
                 )))
             }
             "stack" | "st" => {
-                let length = self.optional_number(&words, 0, "stack")?.unwrap_or(32) as usize;
+                let length = match words.first() {
+                    Some(_) => self.bounded_length(&words, 0, "stack")?,
+                    None => 32,
+                };
                 Ok(CommandResult::Output(view::stack(self.emu, length)))
             }
 
@@ -516,7 +530,7 @@ impl Session<'_> {
             }
             "fill" => {
                 let address = self.address(&words, 0, "fill wants an address")?;
-                let length = self.required_number(&words, 1, "fill wants a length")? as usize;
+                let length = self.bounded_length(&words, 1, "fill")?;
                 let byte = match words.get(2) {
                     Some(word) => parse_number(word)
                         .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))?
@@ -940,6 +954,27 @@ impl Session<'_> {
         parse_number(word)
             .map(u64::from)
             .ok_or_else(|| CommandError::new(format!("cannot read {word:?}")))
+    }
+
+    /// A length that will be used to build a buffer, clamped to something sane.
+    ///
+    /// The length arrives as a `u32` from a human typing at a prompt, and every
+    /// caller turns it straight into an allocation or a loop.  `m D180 4294967295`
+    /// is a four-gigabyte `String` that the user has to wait for, so a length is
+    /// capped rather than obeyed.  The cap is generous -- far more than a view can
+    /// show -- and the message says what happened instead of silently trimming.
+    fn bounded_length(&self, words: &[&str], index: usize, verb: &str) -> Result<usize> {
+        let word = words
+            .get(index)
+            .ok_or_else(|| CommandError::new(format!("{verb} wants a length")))?;
+        let value = parse_number(word)
+            .ok_or_else(|| CommandError::new(format!("{verb} cannot read the length {word:?}")))?;
+        if value as usize > MAX_LENGTH {
+            return Err(CommandError::new(format!(
+                "{verb} was asked for {value} bytes; the most it will do is {MAX_LENGTH}"
+            )));
+        }
+        Ok(value as usize)
     }
 
     fn optional_number(&self, words: &[&str], index: usize, verb: &str) -> Result<Option<u64>> {
@@ -1750,6 +1785,40 @@ mod tests {
         // A syntax error is an error too, not a silent pass.
         assert!(run(&mut emu, &mut debugger, "assert r0 ==").is_err());
         assert!(run(&mut emu, &mut debugger, "assert").is_err());
+    }
+
+    #[test]
+    fn a_length_near_the_top_of_the_space_wraps_instead_of_panicking() {
+        // The address space is 24 bits, so `0xFFFFFFF0 + 64` leaves it.  It must
+        // wrap, not abort: these are ordinary commands and the numbers are the
+        // user's to choose.  Run in a debug build, where an overflow is a panic
+        // rather than a silent wrap.
+        let mut emu = machine();
+        let mut debugger = Debugger::new();
+        run(&mut emu, &mut debugger, "m 0xFFFFFFF0 64").expect("a dump near the top");
+        run(&mut emu, &mut debugger, "disas 0xFFFFFFFE 4").expect("a window at the very top");
+        run(&mut emu, &mut debugger, "disas 0xFFFFFFFE 40").expect("and a longer one");
+        run(&mut emu, &mut debugger, "fill 0xFFFFFFFE 8 0x41").expect("a write across the top");
+    }
+
+    #[test]
+    fn an_absurd_length_is_refused_rather_than_attempted() {
+        // `u32::MAX` bytes would be a four-gigabyte string, so the command is
+        // rejected with a message instead of being obeyed.
+        let mut emu = machine();
+        let mut debugger = Debugger::new();
+        let error = run(&mut emu, &mut debugger, "m D180 4294967295").unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("4294967295"), "says what was asked: {text}");
+        assert!(
+            text.contains(&MAX_LENGTH.to_string()),
+            "and the cap: {text}"
+        );
+        // The same cap applies to the other length-taking commands.
+        assert!(run(&mut emu, &mut debugger, "fill D180 4294967295").is_err());
+        assert!(run(&mut emu, &mut debugger, "stack 4294967295").is_err());
+        // A length at the cap is still allowed.
+        run(&mut emu, &mut debugger, &format!("m D180 {MAX_LENGTH}")).expect("the cap itself");
     }
 
     #[test]

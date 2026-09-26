@@ -757,7 +757,10 @@ impl Debugger {
         let mut pc = address & !1;
         for _ in 0..count {
             let insn = nxu8_asm::disasm::disassemble_one(&mut read, pc);
-            pc += insn.length as u32;
+            // The address space is 24 bits, so walking off the top wraps rather
+            // than overflowing.  `wrapping_add` first: `pc` is masked but the
+            // addition can still leave the space before the mask brings it back.
+            pc = pc.wrapping_add(insn.length as u32) & 0x00FF_FFFF;
             out.push(insn);
         }
         out

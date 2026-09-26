@@ -260,6 +260,11 @@ pub fn step_length(read: &mut dyn CodeRead, address: u32) -> usize {
 }
 
 /// Decode `count` instructions, one per line, address and bytes included.
+///
+/// The first address is used as given -- the data side of the bus masks its
+/// addresses but the code side does not, so this shows what a fetch at that
+/// address would really see.  The walk then wraps at the top of the 24-bit space
+/// rather than overflowing.
 pub fn disassemble(read: &mut dyn CodeRead, address: u32, count: usize) -> String {
     let mut out = String::new();
     let mut pc = address & !1;
@@ -267,16 +272,24 @@ pub fn disassemble(read: &mut dyn CodeRead, address: u32, count: usize) -> Strin
         let insn = disassemble_one(read, pc);
         out.push_str(&insn.listing_line());
         out.push('\n');
-        pc += insn.length as u32;
+        // `wrapping_add` first: the addition can leave the space before the mask
+        // brings it back.
+        pc = pc.wrapping_add(insn.length as u32) & ADDRESS_MASK;
     }
     out
 }
+
+/// The address space is 24 bits, so this is the mask that keeps an address inside
+/// it.
+const ADDRESS_MASK: u32 = 0x00FF_FFFF;
 
 fn bytes_at(read: &mut dyn CodeRead, address: u32, length: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(length);
     let mut offset = 0u32;
     while (offset as usize) < length {
-        bytes.extend_from_slice(&read.halfword(address + offset).to_le_bytes());
+        // Wrapping, for the same reason `disassemble` wraps: an instruction at the
+        // very top of the space still has to render.
+        bytes.extend_from_slice(&read.halfword(address.wrapping_add(offset)).to_le_bytes());
         offset += 2;
     }
     bytes

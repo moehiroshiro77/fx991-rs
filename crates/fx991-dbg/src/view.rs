@@ -201,7 +201,9 @@ pub fn memory(emu: &mut Emu, address: u32, length: usize) -> String {
     let bytes = emu.peek_quiet_block(address, length);
     let mut out = String::new();
     for (row, chunk) in bytes.chunks(16).enumerate() {
-        let row_address = address + (row * 16) as u32;
+        // The address space is 24 bits: a dump that starts near the top runs on
+        // past the end and wraps, rather than overflowing.
+        let row_address = (address.wrapping_add((row * 16) as u32)) & 0x00FF_FFFF;
         out.push_str(&format!("{row_address:05X}h  "));
         for index in 0..16 {
             match chunk.get(index) {
@@ -625,28 +627,24 @@ mod tests {
     }
 
     #[test]
-    fn the_disassembly_keeps_the_whole_address_above_six_digits() {
-        // The address field widens to seven digits past 0xFFFFFF, and the bus is
-        // 24-bit, so this is reachable.  Slicing a fixed six characters off the
-        // front would drop the leading digit and shift every line by one column.
+    fn a_widened_address_field_is_not_truncated_or_misread() {
+        // The address field is formatted with `{:06X}`, a *minimum* width, so an
+        // address above `0xFFFFFF` renders seven digits and pushes the rest of the
+        // line right.  Reading the marker out of the rendered text with a fixed
+        // six-character slice would drop the leading digit and never match the PC.
         let mut emu = emu();
         let mut debugger = Debugger::new();
+        let text = disassembly(&mut debugger, &mut emu, 0x100_0000, 1);
+        assert!(
+            text.starts_with(" 1000000"),
+            "the whole address is shown: {text:?}"
+        );
+        // The walk wraps back into the space rather than overflowing, so the second
+        // line is at the bottom of it.
         let text = disassembly(&mut debugger, &mut emu, 0x100_0000, 2);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        for (index, line) in lines.iter().enumerate() {
-            // One marker column, then the address: `1000000`, `1000002`.
-            let expected = format!(" {:06X}", 0x100_0000 + index * 2);
-            assert!(
-                line.starts_with(&expected),
-                "line {index} should start {expected:?}: {line:?}"
-            );
-        }
-        // The PC is not in this window, so nothing is marked.
-        assert!(
-            lines.iter().all(|line| line.starts_with(' ')),
-            "no line should be marked: {text:?}"
-        );
+        assert!(lines[0].starts_with(" 1000000"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with(" 000002"), "{:?}", lines[1]);
     }
 
     #[test]

@@ -120,6 +120,14 @@ pub const SFR_BASE: u32 = 0x0_F000;
 /// End of the special-function register area, inclusive.
 pub const SFR_END: u32 = 0x0_FFFF;
 
+/// The address space is 24 bits, so this is the mask that keeps an address inside
+/// it.
+///
+/// Addresses wrap rather than growing a 25th bit: adding a length to an address
+/// near the top has to land back at the bottom of the space, not overflow.  This
+/// is what every block access uses.
+pub const ADDRESS_MASK: u32 = 0x00FF_FFFF;
+
 /// A device that owns part of the SFR space.
 ///
 /// Implementors are queried in registration order and must return `None` for any
@@ -436,16 +444,23 @@ impl Bus {
     /// in the fault log or trip a watchpoint on its own.
     pub fn peek_quiet(&mut self, address: u32) -> u8 {
         self.quiet = true;
-        let value = self.read_data_plain(address & 0x00FF_FFFF);
+        let value = self.read_data_plain(address & ADDRESS_MASK);
         self.quiet = false;
         value
     }
 
     /// [`Bus::peek_quiet`] over a range.
+    ///
+    /// The range wraps at the top of the address space rather than running off the
+    /// end of it, so a read that starts near `0xFFFFFF` is still well defined.  A
+    /// caller that wants a bound on the work done passes one: the length is a
+    /// `usize` and an unchecked one would try to build a buffer of that many bytes.
     pub fn peek_quiet_block(&mut self, address: u32, length: usize) -> Vec<u8> {
-        (0..length as u32)
-            .map(|offset| self.peek_quiet(address + offset))
-            .collect()
+        let mut out = Vec::with_capacity(length);
+        for offset in 0..length as u32 {
+            out.push(self.peek_quiet(address.wrapping_add(offset)));
+        }
+        out
     }
 
     /// Fetch a code halfword without recording a fault or reporting a watch.
@@ -674,11 +689,11 @@ impl Memory for Bus {
     }
 
     fn read_data(&mut self, address: u32) -> u8 {
-        self.read_data_inner(address & 0x00FF_FFFF)
+        self.read_data_inner(address & ADDRESS_MASK)
     }
 
     fn write_data(&mut self, address: u32, value: u8) {
-        self.write_data_inner(address & 0x00FF_FFFF, value);
+        self.write_data_inner(address & ADDRESS_MASK, value);
     }
 }
 

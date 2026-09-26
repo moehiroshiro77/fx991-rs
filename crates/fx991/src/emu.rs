@@ -350,10 +350,15 @@ impl Emu {
     }
 
     /// Read a block of data bytes.
+    ///
+    /// The range wraps at the top of the address space rather than running off the
+    /// end of it.
     pub fn peek_block(&mut self, address: u32, length: usize) -> Vec<u8> {
-        (0..length as u32)
-            .map(|offset| self.peek(address + offset))
-            .collect()
+        let mut out = Vec::with_capacity(length);
+        for offset in 0..length as u32 {
+            out.push(self.peek(address.wrapping_add(offset)));
+        }
+        out
     }
 
     /// Write one data byte.
@@ -363,9 +368,11 @@ impl Emu {
     }
 
     /// Write a block of data bytes.
+    ///
+    /// The range wraps at the top of the address space, like [`Emu::peek_block`].
     pub fn poke_block(&mut self, address: u32, bytes: &[u8]) {
         for (offset, byte) in bytes.iter().enumerate() {
-            self.poke(address + offset as u32, *byte);
+            self.poke(address.wrapping_add(offset as u32), *byte);
         }
     }
 
