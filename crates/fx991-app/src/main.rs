@@ -49,7 +49,7 @@ use winit::event::{ElementState, MouseButton as WinitButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowButtons, WindowId};
 
-use gpu::Gpu;
+use gpu::{Gpu, SurfaceProblem};
 use input::{Action, Mouse, MouseButton};
 use window::block_maximise;
 use zoom::{
@@ -243,15 +243,26 @@ impl App {
             gpu.resize_texture(frame.width, frame.height);
             self.frame_size = (frame.width, frame.height);
         }
-        if let Err(err) = gpu.draw(&frame) {
-            match err {
-                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+        match gpu.draw(&frame) {
+            // Presented, or a surface state that only means "skip this frame".
+            Ok(None) => {}
+            Ok(Some(problem)) => match problem {
+                // A lost or outdated surface needs reconfiguring before the next
+                // frame; a minimised window or a slow present needs nothing.
+                SurfaceProblem::Lost | SurfaceProblem::Outdated => {
                     let size = window.inner_size();
                     gpu.resize_surface(size.width, size.height);
                 }
-                wgpu::SurfaceError::OutOfMemory => event_loop.exit(),
-                _ => {}
+                SurfaceProblem::Timeout | SurfaceProblem::Occluded => {}
+            },
+            Err(err) => {
+                eprintln!("draw failed: {err}");
+                event_loop.exit();
             }
+        }
+        if gpu.take_reconfigure_request() {
+            let size = window.inner_size();
+            gpu.resize_surface(size.width, size.height);
         }
     }
 }

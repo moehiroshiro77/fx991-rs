@@ -15,9 +15,9 @@ fx991 = { workspace = true }
 fx991-ui = { workspace = true }
 fx991-model = { workspace = true }
 fx991-bus = { workspace = true }
-wgpu = "27"
+wgpu = "30"
 winit = "0.30"
-pollster = "0.4"
+pollster = "1"
 
 [dev-dependencies]
 testkit = { workspace = true }

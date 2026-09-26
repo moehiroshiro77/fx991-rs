@@ -27,6 +27,41 @@ use std::sync::Arc;
 use fx991_ui::{NATURAL_HEIGHT, NATURAL_WIDTH};
 use winit::window::Window;
 
+/// Why a frame could not be presented.
+///
+/// These are the surface conditions wgpu reports as *states* rather than errors:
+/// a minimised window, a resize the surface has not caught up with, and so on.
+/// None of them is a bug, so they are returned rather than propagated as an
+/// error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceProblem {
+    /// No frame was ready in time; skip it and try again.
+    Timeout,
+    /// The window is minimised or hidden.
+    Occluded,
+    /// The surface configuration no longer matches the window.
+    Outdated,
+    /// The surface itself is gone and must be recreated.
+    Lost,
+}
+
+/// A draw failure that is the program's fault rather than the window's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawError {
+    /// wgpu rejected the draw call.
+    Validation(&'static str),
+}
+
+impl std::fmt::Display for DrawError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DrawError::Validation(what) => write!(f, "{what}"),
+        }
+    }
+}
+
+impl std::error::Error for DrawError {}
+
 /// The GPU side: a surface, a pipeline, and one texture we overwrite per frame.
 pub struct Gpu {
     surface: wgpu::Surface<'static>,
@@ -38,6 +73,9 @@ pub struct Gpu {
     bind_group: wgpu::BindGroup,
     texture: wgpu::Texture,
     sampler: wgpu::Sampler,
+    /// Set when wgpu reported the surface as suboptimal, so the next resize
+    /// reconfigures it even if the size did not change.
+    needs_reconfigure: bool,
     /// The largest texture the device allows, per side.
     ///
     /// The zoom is capped by this: a window taller than the limit makes
@@ -50,12 +88,13 @@ pub struct Gpu {
 impl Gpu {
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window)?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))?;
         // Ask for the adapter's own limits, not `downlevel_defaults`.
         //
@@ -127,8 +166,8 @@ impl Gpu {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blit"),
@@ -152,7 +191,7 @@ impl Gpu {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -166,12 +205,18 @@ impl Gpu {
             bind_group,
             texture,
             sampler,
+            needs_reconfigure: false,
             max_texture_dimension,
         })
     }
 
     /// Upload a composed frame and draw it.
-    pub fn draw(&mut self, frame: &fx991_ui::Frame) -> Result<(), wgpu::SurfaceError> {
+    ///
+    /// Returns `Ok(None)` when the frame was presented, and `Ok(Some(reason))`
+    /// when the surface was not available this time -- a minimised window, or a
+    /// surface that needs reconfiguring.  Neither is an error: the caller just
+    /// skips the frame.  `Err` is reserved for an unusable device.
+    pub fn draw(&mut self, frame: &fx991_ui::Frame) -> Result<Option<SurfaceProblem>, DrawError> {
         // `write_texture` needs no 256-byte row padding (verified in
         //), so the frame goes up as-is.
         self.queue.write_texture(
@@ -194,7 +239,25 @@ impl Gpu {
             },
         );
 
-        let surface_texture = self.surface.get_current_texture()?;
+        // Since wgpu 30 the acquire step returns an enum rather than a
+        // `Result`: the surface problems are ordinary conditions to report, not
+        // errors to propagate.
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                self.needs_reconfigure = true;
+                texture
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Ok(Some(SurfaceProblem::Timeout)),
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(Some(SurfaceProblem::Occluded)),
+            wgpu::CurrentSurfaceTexture::Outdated => return Ok(Some(SurfaceProblem::Outdated)),
+            wgpu::CurrentSurfaceTexture::Lost => return Ok(Some(SurfaceProblem::Lost)),
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(DrawError::Validation(
+                    "get_current_texture reported a validation error",
+                ))
+            }
+        };
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -216,14 +279,16 @@ impl Gpu {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
-        surface_texture.present();
-        Ok(())
+        // Since wgpu 30 presenting is the queue's job, not the texture's.
+        self.queue.present(surface_texture);
+        Ok(None)
     }
 
     /// Rebuild the texture and bind group for a new frame size.
@@ -243,6 +308,15 @@ impl Gpu {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.needs_reconfigure = false;
+    }
+
+    /// Whether wgpu asked for the surface to be reconfigured.
+    ///
+    /// A `Suboptimal` acquisition still gives a usable frame, so the draw
+    /// succeeds; this records that the *next* one should reconfigure first.
+    pub fn take_reconfigure_request(&mut self) -> bool {
+        std::mem::take(&mut self.needs_reconfigure)
     }
 }
 
