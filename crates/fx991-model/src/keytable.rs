@@ -111,6 +111,15 @@ impl KeyTable {
             .and_then(|code| self.by_code.get(code))
     }
 
+    /// Every name the table knows, including the aliases layered over [`KEYS`].
+    ///
+    /// A caller that has to split a string into key names needs this to know how
+    /// long a name can be; taking the bound from the table keeps it right when a
+    /// longer name is added.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
+    }
+
     /// The button's name, or `None` for a code the model file does not mention.
     pub fn name_of(&self, code: u8) -> Option<&'static str> {
         self.by_code.get(&code).map(|key| key.name)

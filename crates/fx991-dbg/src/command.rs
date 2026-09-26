@@ -488,8 +488,14 @@ impl Session<'_> {
                 if text.is_empty() {
                     return Err(CommandError::new("keys wants something to press"));
                 }
+                // Split first, then press: the split borrows the keyboard and
+                // pressing needs the machine mutably.
+                let names = {
+                    let keyboard = self.emu.chipset.keyboard.borrow();
+                    tokenize_keys(keyboard.table(), &text)
+                };
                 let mut pressed = Vec::new();
-                for name in tokenize_keys(&text) {
+                for name in names {
                     let code = self.key_code(&name)?;
                     if let Some(reason) = self.tap_key(code, DEFAULT_SETTLE_TICKS)? {
                         return Ok(CommandResult::Output(format!("{}\n", reason.text())));
@@ -1083,16 +1089,23 @@ fn parse_bytes(text: &str) -> Result<Vec<u8>> {
 /// A name that is one character long is a key on its own; anything longer is
 /// matched greedily against the key table, so `SHIFT` and `EXE` survive while
 /// `1+2` splits into three.
-fn tokenize_keys(text: &str) -> Vec<String> {
+///
+/// The table is borrowed rather than rebuilt: a candidate is tested once per
+/// prefix length at every position, so constructing one here would allocate a
+/// fresh pair of maps per candidate.  Its longest name is the search bound, which
+/// is what makes every name reachable -- a fixed bound shorter than a name
+/// silently orphans it.
+fn tokenize_keys(table: &fx991_model::KeyTable, text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let remaining: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let longest = longest_key_name(table);
     let mut index = 0;
     while index < remaining.len() {
         // Try the longest match first, so a multi-character name is not split.
         let mut matched = None;
-        for length in (1..=(remaining.len() - index).min(8)).rev() {
+        for length in (1..=(remaining.len() - index).min(longest)).rev() {
             let candidate: String = remaining[index..index + length].iter().collect();
-            if known_key_name(&candidate) {
+            if table.by_name(&candidate).is_some() {
                 matched = Some(candidate);
                 break;
             }
@@ -1168,12 +1181,15 @@ and `hits`.  Operators: == != < <= > >= && || ! ( ).  Numbers: 10, 0x0A, 0Ah.
     .to_string()
 }
 
-/// Whether the key model knows this name, so a key sequence can be split.
+/// The longest name the key table defines.
 ///
-/// The table is owned by the chipset and needs a machine to query it, but splitting
-/// a sequence happens before a key is pressed; the model answers on its own.
-fn known_key_name(name: &str) -> bool {
-    fx991_model::KeyTable::new().by_name(name).is_some()
+/// The splitter tries ever-longer prefixes, so this is its bound.  It is a
+/// property of the table rather than a guess: `unnamed-53` and `reciprocal` are
+/// ten characters, and a hard-coded shorter limit would make those names
+/// unreachable from `keys` while `latch`, which does not go through the splitter,
+/// accepted them.
+fn longest_key_name(table: &fx991_model::KeyTable) -> usize {
+    table.names().map(str::len).max().unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -1710,15 +1726,37 @@ mod tests {
 
     #[test]
     fn a_key_sequence_splits_into_the_keys_the_model_knows() {
+        let table = fx991_model::KeyTable::new();
         // `1+2EXE` must become four keys, and a long name must not be split.
-        let keys = tokenize_keys("1+2EXE");
+        let keys = tokenize_keys(&table, "1+2EXE");
         assert_eq!(keys, vec!["1", "+", "2", "EXE"]);
 
-        let keys = tokenize_keys("SHIFT");
+        let keys = tokenize_keys(&table, "SHIFT");
         assert_eq!(keys, vec!["SHIFT"], "a long name survives");
 
-        let keys = tokenize_keys("1 + 2 EXE");
+        let keys = tokenize_keys(&table, "1 + 2 EXE");
         assert_eq!(keys, vec!["1", "+", "2", "EXE"], "spaces are ignored");
+    }
+
+    #[test]
+    fn the_splitter_reaches_every_name_the_table_defines() {
+        // The search bound is the longest name, so a name longer than a fixed
+        // limit would be unreachable -- and `keys Backspace` and `latch Backspace`
+        // would disagree about whether the name exists.
+        let table = fx991_model::KeyTable::new();
+        let longest = longest_key_name(&table);
+        assert!(
+            longest >= 9,
+            "the table has names longer than eight: {longest}"
+        );
+        for name in ["Backspace", "unnamed-53", "reciprocal"] {
+            assert!(table.by_name(name).is_some(), "{name} is in the table");
+            assert_eq!(
+                tokenize_keys(&table, name),
+                vec![name],
+                "{name} must survive the splitter"
+            );
+        }
     }
 
     #[test]

@@ -199,7 +199,8 @@ mod tests {
         // a multi-byte character straddling that boundary must skip the line rather
         // than abort the whole parse.  `e` with an acute accent is two bytes, so it
         // starts at 5 and byte 6 is inside it.
-        let text = "00000\u{e9}  00 00  MOV R0, #0\n000000   00 F0 6A 94        B       00h:0946Ah\n";
+        let text =
+            "00000\u{e9}  00 00  MOV R0, #0\n000000   00 F0 6A 94        B       00h:0946Ah\n";
         assert!(
             !text.is_char_boundary(6),
             "the sample must split a character, or it proves nothing"
@@ -207,7 +208,10 @@ mod tests {
         let listing = Listing::parse(text);
         // The bad line is dropped and the good one still parses.
         assert_eq!(listing.entries().len(), 1);
-        assert_eq!(listing.at(0x000000).unwrap().bytes, vec![0x00, 0xF0, 0x6A, 0x94]);
+        assert_eq!(
+            listing.at(0x000000).unwrap().bytes,
+            vec![0x00, 0xF0, 0x6A, 0x94]
+        );
     }
 
     #[test]
