@@ -36,6 +36,13 @@ skip — so `cargo test` is green on a fresh clone.
 
 ## Build and run
 
+Needs **Rust 1.90**.  That floor comes from the graphical front end — `wgpu` needs
+1.87 and its `ordered-float` dependency needs 1.90 — and is declared once for the
+whole workspace, so one `cargo build` covers every crate.
+
+CI builds and tests on **nightly**, which is the toolchain the project is judged
+by; a separate job checks the declared 1.90 floor still holds.
+
 ```bash
 cargo build --release
 
@@ -72,8 +79,8 @@ dbg> tap SHIFT / tap 8                 # the unit-conversion menu, as a person o
 dbg> keys SHIFT(-)4EXE                 # log10(4): SHIFT+(-) is the one-argument log
 ```
 
-Two scripts come with the repository and each reproduces a finding from the research
-notes on the real firmware:
+Three scripts come with the repository and each reproduces a finding from the
+research notes on the real firmware:
 
 | script | what it proves |
 |---|---|

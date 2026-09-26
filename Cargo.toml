@@ -17,7 +17,11 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# Set by the graphical front end, which is the highest requirement in the
+# workspace: `wgpu` needs 1.87 and its `ordered-float` dependency needs 1.90.
+# The dependency-free crates would build on less, but one number for the whole
+# workspace is simpler to state and to check.
+rust-version = "1.90"
 license = "GPL-3.0-only"
 
 [workspace.dependencies]

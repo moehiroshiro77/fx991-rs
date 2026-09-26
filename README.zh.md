@@ -14,9 +14,13 @@
 |---|---|---|
 | `data/rom_verF.bin` | ROM 镜像 | 262 144 字节，MD5 `47bbf88fb3a9432b311b423f9b766e8f` |
 | `data/skin.rgba` | 面板贴图 | 307×615，8 位 RGBA，无文件头，755 220 字节 |
-| `data/_disas_verF.txt` | 反汇编列表（可选） | 只有 `emu disas` 需要 |
+| `data/_disas_verF.txt` | 反汇编列表（可选） | 只有 `emu disas --listing` 需要 |
 
 三个路径都可以覆盖：`--rom PATH`、`--skin PATH`、`--listing PATH`。
+
+调试器只需要 ROM：它从内存里现解码指令，不读那份列表，所以补丁改过的字节、写进 RAM 的
+代码、列表生成器没见过的 opcode 都能显示。列表另有用途——测试套件会渲染它全部
+116 943 条指令并要求两边一致，这是解码器与一份独立实现互证的依据。
 
 面板贴图是裸像素缓冲，按行排列的 RGBA，没有文件头。用任意 PNG 库解码计算器的
 随手册提供的键面图后把像素写出来即可；模拟器会校验长度，尺寸不对会直接报错，不会画出
@@ -26,6 +30,13 @@
 clone 下来 `cargo test` 是全绿的。
 
 ## 构建与运行
+
+需要 **Rust 1.90**。这个下限来自图形前端——`wgpu` 要求 1.87，它依赖的
+`ordered-float` 要求 1.90——整个工作区只声明这一个值，所以一条 `cargo build`
+就覆盖全部 crate。
+
+CI 在 **nightly** 上构建与测试，这是本项目的验收工具链；另有一个 job 专门检查
+声明的 1.90 下限是否仍然成立。
 
 ```bash
 cargo build --release
@@ -59,6 +70,7 @@ dbg> regs / stack / context
 dbg> snap before / restore before / diff before now
 dbg> patch 10000h POP PC               # ROP 研究：植入 gadget
 dbg> tap SHIFT / tap 8                 # 单位换算菜单，按真人的顺序打开
+dbg> keys SHIFT(-)4EXE                 # log10(4)：SHIFT+(-) 才是单参数 log
 ```
 
 仓库带三个脚本，各自在真实固件上复现研究笔记里的一条结论：
@@ -69,14 +81,14 @@ dbg> tap SHIFT / tap 8                 # 单位换算菜单，按真人的顺序
 | `scripts/selftest-entry.dbg` | 按住 SHIFT 与 7 再按 ON 可进入自检 |
 | `scripts/lbf-converter.dbg` | `lbf/in²>kPa` 字符转换器的原理：`23h` 是历史记录的结束符 |
 
-前两者是研究笔记旁那份 Python 实验的独立重写，结果一致；第三个回答了 ROP 教科书
-对该字符为何能转换所留下的问题。完整文档（含四个值得知道的
-设计取舍）见 [`docs/debugger.md`](docs/debugger.md)。
+每个脚本都会对自己演示的结论下断言，断言失败即非零退出，因此它们同时是这些行为的
+回归测试。完整文档（含四个值得知道的设计取舍）见
+[`docs/debugger.md`](docs/debugger.md)。
 
 ## 许可
 
-**GNU 通用公共许可证第 3 版**，见 [`LICENSE`](LICENSE)。工作区内 10 个 crate
-全部是 `GPL-3.0-only`，没有例外。
+**GNU 通用公共许可证第 3 版**，见 [`LICENSE`](LICENSE)。工作区内全部 crate
+都是 `GPL-3.0-only`，没有例外。
 
 在法律允许的范围内，本程序**不提供任何担保**。它是自由软件：你可以按 GPL 的条款
 再分发和修改；如果你分发修改版，必须提供对应的源码。

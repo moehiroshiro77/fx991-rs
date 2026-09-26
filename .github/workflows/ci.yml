@@ -12,12 +12,16 @@ env:
 
 jobs:
   # Formatting and lints are cheap, so they run first and fail fast.
+  #
+  # Nightly is the reference toolchain: it reports lints stable does not, so it is
+  # what the build is judged by.  See the `msrv` job for the other half of the
+  # picture.
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -38,7 +42,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
 
       # The graphical front end needs system libraries that the runner images do
@@ -53,6 +57,19 @@ jobs:
 
       - run: cargo test --workspace
 
+  # The declared MSRV is a promise to anyone who builds this, so something has to
+  # hold it.  Every other job runs a toolchain newer than the floor, which means
+  # none of them can notice the floor has drifted.  This one builds on the exact
+  # version `Cargo.toml` names.
+  msrv:
+    name: msrv (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
   # Documentation builds are part of the public surface, so broken intra-doc
   # links fail the build rather than going unnoticed.
   docs:
@@ -62,7 +79,7 @@ jobs:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
 
@@ -84,7 +101,7 @@ jobs:
           - aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
