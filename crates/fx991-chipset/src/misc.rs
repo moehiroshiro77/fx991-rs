@@ -11,9 +11,9 @@
 
 //! Miscellaneous SFRs: DSR, standby control, and the "unknown" holes.
 //!
-//!  binds a fixed list of single-byte SFRs plus
-//! two wider blobs at `0xF048` (8 bytes) and `0xF220` (4 bytes).  The single-byte
-//! list is the `addr[]` array in.
+//! This block owns a fixed list of single-byte SFRs plus two wider blobs at
+//! `0xF048` (8 bytes) and `0xF220` (4 bytes).  The single-byte list is
+//! [`SINGLE_BYTE_SFRS`].
 //!
 //! `StandbyControl` is folded in here because it
 //! only needs two shadow bytes: `0xF008` arms the STOP acceptor (`0x5_` then

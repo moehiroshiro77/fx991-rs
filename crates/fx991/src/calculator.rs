@@ -18,15 +18,15 @@
 //!
 //! `Calculator` encapsulates exactly that:
 //!
-//! `no_run
-//! use fx991:Calculator;
+//! ```no_run
+//! use fx991::Calculator;
 //!
-//! let mut calc = Calculator:from_rom_path("data/rom_verF.bin").unwrap;
-//! calc.press("1+2").unwrap;
-//! assert_eq!(calc.input, "1+2");
-//! calc.press("EXE").unwrap;
-//! assert_eq!(calc.answer_text, "3");
-//! `
+//! let mut calc = Calculator::from_rom_path("data/rom_verF.bin").unwrap();
+//! calc.press("1+2").unwrap();
+//! assert_eq!(calc.input(), "1+2");
+//! calc.press("EXE").unwrap();
+//! assert_eq!(calc.answer_text(), "3");
+//! ```
 //!
 //! What it does *not* hide: the ROM only accepts a key press while it is inside its
 //! key-wait loop with the filter armed, so [`Calculator::press`] advances the machine

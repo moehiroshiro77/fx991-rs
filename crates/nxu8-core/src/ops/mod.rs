@@ -17,10 +17,9 @@
 //! surprise worth flagging (the dummy stack byte, the CTRL selector packing, the
 //! flag-merge mask), and those say so inline.
 //!
-//!  names a handler per opcode row and each functional group lives in its
-//! own translation unit (,..).  Keeping the
-//! same split makes the two implementations diffable group by group rather than
-//! as one large function.
+//! Each opcode row names a handler, and each functional group lives in its own
+//! translation unit.  Keeping that split makes the groups diffable one at a time
+//! rather than as one large function.
 
 #![allow(missing_docs)]
 

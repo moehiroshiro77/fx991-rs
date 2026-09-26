@@ -229,9 +229,9 @@ impl Interrupts {
 
     /// Pick the highest-priority outstanding request, or `None`.
     ///
-    /// Mirrors.  The indices are meaningful (they *are* the
-    /// interrupt numbers, which is also the vector index / 2), so the loops keep the
-    /// Indexed rather than iterated so the bit index is explicit.
+    /// The source indices are meaningful -- they *are* the interrupt numbers,
+    /// which is also the vector index divided by two -- so the scan keeps them
+    /// rather than iterating, and the bit index stays explicit.
     #[allow(clippy::needless_range_loop)]
     pub fn select(&self, old_level: usize) -> Option<usize> {
         if self.active[INT_RESET] {

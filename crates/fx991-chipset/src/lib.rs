@@ -38,16 +38,16 @@
 //!
 //! # Example
 //!
-//! `no_run
-//! use fx991_bus:{Bus, Rom};
-//! use fx991_chipset:Chipset;
+//! ```no_run
+//! use fx991_bus::{Bus, Rom};
+//! use fx991_chipset::Chipset;
 //!
 //! let rom = std::fs::read("data/rom_verF.bin").unwrap();
 //! let mut chipset = Chipset::new(Bus::new(Rom::new(rom)));
-//! chipset.reset;
+//! chipset.reset();
 //! chipset.tick(None);
 //! assert_eq!(chipset.cpu.regs.pc, 0x946E);
-//! `
+//! ```
 
 #![warn(missing_docs)]
 

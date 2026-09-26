@@ -14,8 +14,6 @@
 //! Coordinates are in skin pixels.  Geometry only -- no rendering logic lives here;
 //! see `Renderer` for that.
 
-//! Geometry parsed out of.
-
 /// A button's hit box in skin coordinates, plus the matrix code it presses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Button {

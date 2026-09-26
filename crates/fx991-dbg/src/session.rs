@@ -502,7 +502,6 @@ impl Debugger {
     }
 
     /// Run until a breakpoint or watch fires, or the budget is spent.
-    /// Run until a breakpoint or watch fires, or the budget is spent.
     ///
     /// # A parked machine is waited out, not reported
     ///
@@ -549,7 +548,7 @@ impl Debugger {
         }
     }
 
-    /// Run a budget without consulti any breakpoint, for "let it settle" steps.
+    /// Run a budget without consulting any breakpoint, for "let it settle" steps.
     pub fn run_uninterrupted(&mut self, emu: &mut Emu, budget: u64) {
         for _ in 0..budget {
             self.tick(emu);

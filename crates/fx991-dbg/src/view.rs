@@ -43,10 +43,10 @@ use crate::session::Debugger;
 /// second indented, because that is what the bytes say and what the CPU treats as
 /// one step.
 ///
-/// The lines are built from [`Insn`]s rather than by re-reading the rendered
-/// listing: the address field widens past six digits above `0xFFFFFF`, and
-/// slicing a fixed six characters off the front would then eat a digit and
-/// misplace the marker.
+/// The lines are built from [`nxu8_asm::disasm::Insn`]s rather than by re-reading
+/// the rendered listing: the address field widens past six digits above
+/// `0xFFFFFF`, and slicing a fixed six characters off the front would then eat a
+/// digit and misplace the marker.
 pub fn disassembly(debugger: &mut Debugger, emu: &mut Emu, address: u32, count: usize) -> String {
     let pc = emu.pc();
     let insns = debugger.disassemble_insns(emu, address, count);

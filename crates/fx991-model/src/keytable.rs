@@ -13,10 +13,10 @@
 //!
 //! Three things have to line up for a key press to mean something:
 //!
-//! 1. **The matrix code** -- the value in 's `button_map`.  This is what
+//! 1. **The matrix code** -- the value in the emulator's own key map.  This is what
 //!    the KO/KI scan uses and the only thing the hardware knows.
-//! 2. **The button** (`+`/`SHIFT`/`ALPHA`/`sin`/..).   leaves 18 of the
-//!    48 buttons unnamed.
+//! 2. **The button** (`+`/`SHIFT`/`ALPHA`/`sin`/..).  The emulator's key map leaves
+//!    18 of the 48 buttons unnamed.
 //! 3. **The token the ROM writes into the input area** (`ram:0xD180`).  This is the
 //!    calculator's own character code and is independent of the matrix code.
 //!

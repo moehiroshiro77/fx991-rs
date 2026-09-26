@@ -9,12 +9,12 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
 // Public License in LICENSE for more details.
 
-//! Keyboard matrix, faithful to.
+//! Keyboard matrix.
 //!
 //! The real-hardware path is the one that matters (`real_hardware = 1`):
 //!
 //! * A button is identified by a 6-bit index `((code >> 1) & 0x38) | (code & 7)`;
-//!   `code` is the value from 's `button_map`.
+//!   `code` is the matrix code the key table gives for the button.
 //! * `ko_bit = 1 << ((code >> 4) & 0xF)` selects the output ("column") line,
 //!   `ki_bit = 1 << (code & 0xF)` the input ("row") line.
 //! * KI (`0xF040`) idles at `0xFF`; a pressed button whose `ko_bit` is driven low

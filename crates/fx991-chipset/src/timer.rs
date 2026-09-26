@@ -44,10 +44,10 @@ pub const UNKNOWN_F024: u32 = 0x0_F024;
 /// `0xF025`, bit 0 starts the timer
 pub const CONTROL: u32 = 0x0_F025;
 
-///  -- `DivideTicks` runs once per this many CPU instructions.
+/// How many CPU instructions pass between two divides.
 pub const EXT_TO_INT_FREQUENCY: u64 = 10000;
 
-///  -- HW_CLASSWIZ runs at 2 Mi instructions/s.
+/// The instruction rate `HW_CLASSWIZ` runs at.
 pub const HW_CLASSWIZ_CYCLES_PER_SECOND: u64 = 2 * 1024 * 1024;
 
 /// Instructions between divider ticks (209.7, truncated to 209).

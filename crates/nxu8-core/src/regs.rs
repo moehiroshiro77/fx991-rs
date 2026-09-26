@@ -24,7 +24,7 @@
 //! `
 //!
 //! `lr`/`lcsr`/`psw` are element 0 of their ELEVEL-indexed banks, matching the
-//! `reg_elr[0]`-style aliases in.
+//! `reg_elr[0]`-style aliases the hardware provides.
 
 /// Carry / borrow.
 pub const PSW_C: u8 = 0x80;

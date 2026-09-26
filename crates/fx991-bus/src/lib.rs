@@ -69,7 +69,7 @@ impl Rom {
     }
 }
 
-/// One of the ROM windows from  for HW_CLASSWIZ.
+/// One of the ROM windows, for `HW_CLASSWIZ`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RomWindow {
     /// Start of the window in the data space.

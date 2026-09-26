@@ -177,7 +177,7 @@ impl Frame {
 
 /// The stamp alphas for a given contrast, after the mode-6 override.
 ///
-///  for the formulas, `:355-360` for the override.
+/// The formulas are the reference `SetContrast` ones; mode 6 overrides both.
 pub fn alpha_levels(contrast: u8, mode: u8) -> (u8, u8) {
     let on = (20 + contrast as u16 * 16).min(255) as u8;
     let off = ((contrast as i16 - 8) * 7).max(0) as u8;
@@ -289,7 +289,7 @@ impl Renderer {
             rgba,
         };
 
-        //: anything else means "draw nothing at all".
+        // Any other mode means "draw nothing at all".
         if mode != 4 && mode != 5 && mode != 6 {
             return frame;
         }
@@ -386,7 +386,7 @@ impl Frame {
 
 /// The button whose rectangle contains `(x, y)`, in skin coordinates.
 ///
-/// The first match in  order wins and the search stops, so
+/// The first match in list order wins and the search stops, so
 /// overlapping boxes resolve to the earlier entry.  The interval is **half-open**
 /// on the far edge: `x < rect.x + w`.
 pub fn button_at(x: i32, y: i32) -> Option<&'static Button> {

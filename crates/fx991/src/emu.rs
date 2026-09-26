@@ -11,7 +11,7 @@
 
 //! The scripting surface: breakpoints, bounded runs, tracing, and snapshots.
 //!
-//! The experiments in  all read the same way -- "run until X,
+//! The experiments this crate was built for all read the same way -- "run until X,
 //! look at the registers" -- so that loop is the API rather than something each
 //! script reimplements.
 //!

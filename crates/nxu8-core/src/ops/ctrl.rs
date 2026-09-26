@@ -11,7 +11,7 @@
 
 //! Control-register, branch and PSW handlers.
 //!
-//! Control-flow instructions.  Notable points:  Notable points:
+//! Control-flow instructions.  Notable points:
 //!
 //! * `OP_CTRL` dispatches on `impl_hint >> 8`, the 1.=11 selector packed into the
 //!   table's hint field.  Selector 5 is `MOV ERn,SP`, 11 is `MOV SP,ERn`.

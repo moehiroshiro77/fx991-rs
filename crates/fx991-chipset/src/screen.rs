@@ -11,7 +11,7 @@
 
 //! Screen buffer and controls.
 //!
-//! Geometry from  for `HW_CLASSWIZ`:
+//! Geometry for `HW_CLASSWIZ`:
 //!
 //! `text
 //! N_ROW = 63          rows of dot matrix, excluding the status row

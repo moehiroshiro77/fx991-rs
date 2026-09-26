@@ -11,7 +11,7 @@
 
 //! PUSH/POP handlers.
 //!
-//! Stack instructions.  The stack rules here are the whole  The stack rules here are the whole
+//! Stack instructions.  The stack rules here are the whole
 //! foundation of the ROP work, so they are quoted rather than paraphrased:
 //!
 //! `text
