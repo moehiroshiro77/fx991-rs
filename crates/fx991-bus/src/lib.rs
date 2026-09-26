@@ -404,11 +404,17 @@ impl Bus {
     }
 
     /// Record an access against the armed watches.
+    ///
+    /// Both the address and the direction have to match a watch, not just the
+    /// direction: an access to some other address is not a hit, and counting it
+    /// as one would both inflate [`Bus::watch_hit_count`] and, worse, push real
+    /// hits out of a full buffer.
     fn note_access(&mut self, kind: Access, address: u32, value: u8) {
-        if self.watches.is_empty() {
-            return;
-        }
-        if !self.watches.iter().any(|watch| watch.wants(kind)) {
+        if !self
+            .watches
+            .iter()
+            .any(|watch| watch.address == address && watch.wants(kind))
+        {
             return;
         }
         self.watch_hit_count += 1;
@@ -959,6 +965,47 @@ mod tests {
         let hits = bus.take_watch_hits();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, Access::Code);
+    }
+
+    #[test]
+    fn a_watch_ignores_an_access_to_another_address() {
+        // The direction alone is not a match.  Counting an unrelated access would
+        // inflate the hit count and could push a real hit out of a full buffer.
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+
+        use nxu8_core::Memory;
+        bus.write_data(0x0_D181, 0x99);
+        assert!(
+            bus.take_watch_hits().is_empty(),
+            "0xD181 is not the watched address"
+        );
+        assert_eq!(bus.watch_hit_count(), 0);
+
+        // The watched address itself still reports, so the filter is not simply
+        // rejecting everything.
+        bus.write_data(0x0_D180, 0x5A);
+        assert_eq!(bus.take_watch_hits().len(), 1);
+        assert_eq!(bus.watch_hit_count(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_access_cannot_evict_a_real_hit_from_the_buffer() {
+        // A busy machine with one watch armed: the buffer has to hold the hits
+        // that matter, not the traffic that happens to run in the same direction.
+        let mut bus = Bus::new(rom32k());
+        bus.watch(Watch::data(0x0_D180));
+
+        use nxu8_core::Memory;
+        for i in 0..(MAX_BUFFERED_WATCH_HITS as u32 * 2) {
+            bus.write_data(0x0_D181, i as u8);
+        }
+        assert_eq!(bus.watch_hit_count(), 0, "no hit yet");
+
+        bus.write_data(0x0_D180, 0x41);
+        let hits = bus.take_watch_hits();
+        assert_eq!(hits.len(), 1, "the buffer was not filled by 0xD181");
+        assert_eq!(hits[0].address, 0x0_D180);
     }
 
     #[test]
