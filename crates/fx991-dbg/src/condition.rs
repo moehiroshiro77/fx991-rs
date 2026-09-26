@@ -493,10 +493,23 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
                 index += width;
             }
             _ if byte.is_ascii_digit() => {
-                let (number, width) = parse_number(&source[index..]).ok_or_else(|| ParseError {
-                    message: "could not read that number".to_string(),
-                    position: index,
-                })?;
+                let (number, width) =
+                    crate::number::parse_prefix(&source[index..]).ok_or_else(|| ParseError {
+                        message: "could not read that number".to_string(),
+                        position: index,
+                    })?;
+                tokens.push(Token::Number(number));
+                index += width;
+            }
+            // `$10` is the other hex prefix the command line accepts, so it has to
+            // work here too.  It cannot be folded into the arm above because that
+            // one is reached only on a leading digit.
+            b'$' => {
+                let (number, width) =
+                    crate::number::parse_prefix(&source[index..]).ok_or_else(|| ParseError {
+                        message: "`$` must be followed by hex digits".to_string(),
+                        position: index,
+                    })?;
                 tokens.push(Token::Number(number));
                 index += width;
             }
@@ -518,50 +531,6 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ParseError> {
         }
     }
     Ok(tokens)
-}
-
-/// Read a number: `0x`/`0X` hex, `0b`/`0B` binary, a trailing `h` for hex, or
-/// decimal.  Returns the value and how many bytes it consumed.
-fn parse_number(source: &str) -> Option<(u64, usize)> {
-    let bytes = source.as_bytes();
-    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
-        let digits = digits_of(&source[2..], 16);
-        if digits == 0 {
-            return None;
-        }
-        return u64::from_str_radix(&source[2..2 + digits], 16)
-            .ok()
-            .map(|value| (value, 2 + digits));
-    }
-    if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'b' | b'B') {
-        let digits = digits_of(&source[2..], 2);
-        if digits == 0 {
-            return None;
-        }
-        return u64::from_str_radix(&source[2..2 + digits], 2)
-            .ok()
-            .map(|value| (value, 2 + digits));
-    }
-    // A trailing `h` marks hex, the way the plans write addresses.
-    let hex_digits = digits_of(source, 16);
-    if hex_digits > 0 && source[hex_digits..].starts_with('h') {
-        return u64::from_str_radix(&source[..hex_digits], 16)
-            .ok()
-            .map(|value| (value, hex_digits + 1));
-    }
-    let digits = digits_of(source, 10);
-    source[..digits]
-        .parse::<u64>()
-        .ok()
-        .map(|value| (value, digits))
-}
-
-/// How many leading characters of `source` are valid digits in `radix`.
-fn digits_of(source: &str, radix: u32) -> usize {
-    source
-        .bytes()
-        .take_while(|byte| (*byte as char).is_digit(radix))
-        .count()
 }
 
 // ---------------------------------------------------------------------- parser
@@ -667,6 +636,15 @@ impl Parser {
                 if let Some(address) = parse_symbol(&name) {
                     return Ok(Expr::Address(address));
                 }
+                // A bare address, the way the project's notes write them: `D180`
+                // starts with a letter, so the tokenizer reads it as a name before
+                // any number rule can see it.  Registers and symbols are matched
+                // above, so this only catches what neither claims -- and the shared
+                // grammar only treats a run as hex when it is long enough and holds
+                // a hex letter, which no symbol here does.
+                if let Some(address) = crate::number::parse_u32(&name) {
+                    return Ok(Expr::Address(address));
+                }
                 Err(ParseError {
                     message: format!(
                         "unknown name {name:?}; try a register like `r0`, a symbol like \
@@ -736,6 +714,55 @@ mod tests {
             hits,
         };
         expr.eval(&mut context)
+    }
+
+    /// The value an expression naming an address resolves to, however it is written.
+    fn number_value(text: &str) -> u64 {
+        match Expr::parse(text).expect("parses") {
+            Expr::Number(value) => value,
+            Expr::Address(address) => address as u64,
+            other => panic!("{text} parsed as {other:?}, which is not a plain value"),
+        }
+    }
+
+    #[test]
+    fn a_bare_address_parses_the_way_the_command_line_reads_it() {
+        // `D180` begins with a letter, so the tokenizer calls it a name; the parser
+        // then has to recognise it as an address, or the same notation that works in
+        // `m D180` would be an error inside `if [D180] == 1`.
+        //
+        // Asserted by value rather than by variant: a leading digit goes through the
+        // number rule and a leading letter through the name rule, so the two forms
+        // produce different `Expr` variants for the same place.  `value()` treats
+        // them alike, which is what a condition depends on.
+        for text in [
+            "D180", "d180", "0xD180", "0XD180", "$D180", "D180h", "D180H",
+        ] {
+            assert_eq!(number_value(text), 0xD180, "{text}");
+        }
+        for text in ["121A8", "0x121A8", "121A8h"] {
+            assert_eq!(number_value(text), 0x1_21A8, "{text}");
+        }
+        // A plain decimal is still a plain decimal.
+        assert_eq!(number_value("16"), 16);
+    }
+
+    #[test]
+    fn a_symbol_or_register_name_is_never_read_as_an_address() {
+        // The address fallback runs last, so every name the tables define still
+        // resolves to itself.  This is the property that keeps the fallback safe.
+        for (name, _) in SYMBOLS {
+            assert!(
+                crate::number::parse_u32(name).is_none(),
+                "symbol {name:?} would be shadowed by the address fallback"
+            );
+        }
+        // A symbol still resolves to its own address, not to something the number
+        // grammar made up.
+        assert_eq!(Expr::parse("filter").unwrap(), Expr::Address(0xF042));
+        assert_eq!(Expr::parse("idle").unwrap(), Expr::Address(0x9216));
+        // And a register is still a register.
+        assert_eq!(Expr::parse("er0").unwrap(), Expr::Register(Reg::Word(0)));
     }
 
     #[test]

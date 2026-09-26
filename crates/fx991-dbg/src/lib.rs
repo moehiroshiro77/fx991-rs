@@ -56,6 +56,7 @@
 pub mod breakpoint;
 pub mod command;
 pub mod condition;
+pub mod number;
 pub mod patch;
 pub mod session;
 pub mod snapshot;
@@ -65,6 +66,7 @@ pub mod view;
 pub use breakpoint::{Breakpoint, BreakpointId, Watch, WatchId, WatchKind};
 pub use command::{CommandError, CommandResult, Session};
 pub use condition::{Context, Expr, ParseError};
+pub use number::parse_u32 as parse_number;
 pub use patch::{Patch, PatchError, Patcher, Patches};
 pub use session::{Debugger, StopReason};
 pub use snapshot::{Diff, Snapshot, Snapshots};

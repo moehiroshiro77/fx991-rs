@@ -454,26 +454,12 @@ fn parse_address(text: &str) -> Result<u16, PatchError> {
         .map_err(|_| PatchError::Assembly(format!("{value:#x} does not fit in an address")))
 }
 
-/// A number, decimal or hexadecimal.
+/// A number, in the shared grammar the command line and conditions use.
 ///
-/// Hex is accepted as `0x`/`0X`/`$` prefixed, or with a trailing `h` as the plans
-/// write addresses.  A trailing `h` is tried *before* decimal so `0F968h` -- which
-/// is not a decimal number and would otherwise fail -- reads as hex.
+/// The grammar lives in [`crate::number`]; this is the narrow-to-`u32` entry point
+/// for the assembler's operands.
 fn parse_u32(text: &str) -> Option<u32> {
-    let text = text.trim();
-    if let Some(hex) = text
-        .strip_prefix("0x")
-        .or_else(|| text.strip_prefix("0X"))
-        .or_else(|| text.strip_prefix('$'))
-    {
-        return u32::from_str_radix(hex, 16).ok();
-    }
-    if let Some(hex) = text.strip_suffix(['h', 'H']) {
-        if let Ok(value) = u32::from_str_radix(hex, 16) {
-            return Some(value);
-        }
-    }
-    text.parse().ok()
+    crate::number::parse_u32(text)
 }
 
 fn condition_code(text: &str) -> Option<u8> {

@@ -1006,65 +1006,16 @@ fn split_verb(line: &str) -> (&str, &str) {
     }
 }
 
-/// A number in any notation the plans and the command line use.
+/// A number on the command line.
 ///
-/// `0x`/`0X`/`$` prefix, a trailing `h`, or decimal -- plus the bare hex the
-/// project's own notes write addresses in (`D180`, `F042`), accepted only when the
-/// run contains a hex letter and so cannot be decimal.
-///
-/// # The five-digit ambiguity, and why it is not guessed
-///
-/// `22110` is a valid decimal *and* a valid hex address, and the two are different
-/// places (`0x565E` versus `0x22110`).  Guessing would be the worst outcome: a
-/// breakpoint would silently land somewhere plausible and the user would believe a
-/// wrong result.  So a bare all-digit run is decimal, and the address is written
-/// `22110h` or `0x22110` to mean hex.  A hex *letter* is unambiguous, so `121A8`
-/// works unqualified.
+/// The grammar itself lives in [`crate::number`], which the patch assembler and the
+/// condition language also use, so one notation works in all three.  What this adds
+/// is the command line's tolerance for a leading `#`: it is the assembly notation
+/// for an immediate, accepted so `set r0 #0x41` reads the way the patch commands do.
 pub fn parse_number(text: &str) -> Option<u32> {
-    // A leading `#` is the assembly notation for an immediate, accepted here so
-    // `set r0 #0x41` reads the way the patch commands do.
     let text = text.trim();
     let text = text.strip_prefix('#').unwrap_or(text);
-    if text.is_empty() {
-        return None;
-    }
-    if let Some(hex) = text
-        .strip_prefix("0x")
-        .or_else(|| text.strip_prefix("0X"))
-        .or_else(|| text.strip_prefix('$'))
-    {
-        return u32::from_str_radix(hex, 16).ok();
-    }
-    if let Some(hex) = text.strip_suffix(['h', 'H']) {
-        if let Ok(value) = u32::from_str_radix(hex, 16) {
-            return Some(value);
-        }
-    }
-    // A run containing a hex letter cannot be decimal, so it is an address: this is
-    // what lets `121A8` and `D180` be written the way the notes write them.
-    let has_hex_letter = text
-        .bytes()
-        .any(|byte| matches!(byte, b'a'..=b'f' | b'A'..=b'F'));
-    if has_hex_letter && text.len() >= 3 {
-        if let Ok(value) = u32::from_str_radix(text, 16) {
-            return Some(value);
-        }
-    }
-    if let Ok(value) = text.parse::<u32>() {
-        return Some(value);
-    }
-    // Only now, when it cannot be decimal: a bare hex address like `D180`.
-    //
-    // Three or more digits, because a two-digit run is overwhelmingly a small
-    // decimal.  That leaves five-digit addresses ambiguous -- `22110` is both a
-    // decimal and `0x22110` -- and the decimal reading wins, because writing an
-    // address as five bare hex digits is unusual and `0x` is always available.
-    if text.bytes().all(|byte| byte.is_ascii_hexdigit()) && text.len() >= 3 {
-        if let Ok(value) = u32::from_str_radix(text, 16) {
-            return Some(value);
-        }
-    }
-    None
+    crate::number::parse_u32(text)
 }
 
 /// Parse hex bytes, with or without separators.
