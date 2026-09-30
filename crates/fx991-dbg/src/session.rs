@@ -763,6 +763,55 @@ impl Debugger {
         }
         out
     }
+
+    /// The disassembly around the current PC, as structured instructions.
+    ///
+    /// The window is aligned to instruction boundaries so the instruction at the
+    /// PC is always one of the returned entries: `before` instructions precede it
+    /// and `after` follow, for `before + 1 + after` entries in all.
+    pub fn disassemble_insns_at_pc(
+        &mut self,
+        emu: &mut Emu,
+        before: usize,
+        after: usize,
+    ) -> Vec<Insn> {
+        let start = aligned_start(emu, before);
+        self.disassemble_insns(emu, start, before + 1 + after)
+    }
+}
+
+/// Walk `before` instruction boundaries backwards from the PC.
+///
+/// Walking backwards has to test both possible lengths: the previous instruction
+/// is 2 or 4 bytes, so the one that ends exactly at `start` is the right answer
+/// and simply stepping back by 4 would land mid-instruction.
+fn aligned_start(emu: &mut Emu, before: usize) -> u32 {
+    let mut start = emu.pc();
+    for _ in 0..before {
+        let mut found = None;
+        for back in [2u32, 4] {
+            let candidate = start.saturating_sub(back) & !1;
+            if candidate == start {
+                continue;
+            }
+            if candidate + step_length(emu, candidate) as u32 == start {
+                found = Some(candidate);
+                break;
+            }
+        }
+        match found {
+            Some(candidate) => start = candidate,
+            // The beginning of the space: nothing further back to show.
+            None => break,
+        }
+    }
+    start
+}
+
+/// The length of one *executed* step, i.e. a `DSR<-` prefix plus its payload.
+fn step_length(emu: &mut Emu, address: u32) -> usize {
+    let mut read = |at: u32| emu.chipset.bus.read_code_quiet(at);
+    nxu8_asm::disasm::step_length(&mut read, address)
 }
 
 #[cfg(test)]
@@ -1385,6 +1434,48 @@ mod tests {
         let text = debugger.disassemble(&mut emu, 0x1_0000, 1);
         assert!(text.contains("POP"), "{text}");
         assert!(text.contains("8E F2"), "{text}");
+    }
+
+    #[test]
+    fn the_structured_disassembly_at_pc_puts_the_pc_in_the_window() {
+        let mut emu = scratch(&short_program());
+        let mut debugger = Debugger::new();
+        // Step onto the third instruction, so the window has to walk back past
+        // two others to align on it.
+        debugger.step(&mut emu);
+        debugger.step(&mut emu);
+        assert_eq!(emu.pc(), 0x1_0004);
+
+        let insns = debugger.disassemble_insns_at_pc(&mut emu, 2, 1);
+        assert_eq!(insns.len(), 4, "before + 1 + after");
+        assert_eq!(
+            insns.iter().map(|insn| insn.address).collect::<Vec<_>>(),
+            vec![0x1_0000, 0x1_0002, 0x1_0004, 0x1_0006]
+        );
+        assert!(
+            insns.iter().any(|insn| insn.address == emu.pc()),
+            "the PC is one of the entries"
+        );
+    }
+
+    #[test]
+    fn the_window_at_pc_stops_at_the_beginning_of_the_space() {
+        // At address 0 there is nothing behind, so the walk back has to give up
+        // rather than wrap to the top of the 24-bit space.  The window keeps its
+        // size and simply starts at the lowest address it could reach, which is
+        // what makes the caller's line count stable.
+        let mut emu = scratch(&short_program());
+        let mut debugger = Debugger::new();
+        emu.chipset.cpu.regs.csr = 0;
+        emu.chipset.cpu.regs.pc = 0;
+
+        let insns = debugger.disassemble_insns_at_pc(&mut emu, 4, 0);
+        assert_eq!(insns.len(), 5, "before + 1 + after, anchored at 0");
+        assert_eq!(insns[0].address, 0, "the walk stopped at the start");
+        // Contiguous and ascending, so nothing wrapped.
+        for pair in insns.windows(2) {
+            assert_eq!(pair[1].address, pair[0].address + pair[0].length as u32);
+        }
     }
 
     #[test]

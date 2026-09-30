@@ -178,6 +178,95 @@ impl Cmp {
             Cmp::Ge => left >= right,
         }
     }
+
+    /// The operator's spelling, as the parser accepts it.
+    fn text(self) -> &'static str {
+        match self {
+            Cmp::Eq => "==",
+            Cmp::Ne => "!=",
+            Cmp::Lt => "<",
+            Cmp::Le => "<=",
+            Cmp::Gt => ">",
+            Cmp::Ge => ">=",
+        }
+    }
+}
+
+impl std::fmt::Display for Cmp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
+impl std::fmt::Display for Flag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Flag::Carry => "c",
+            Flag::Zero => "z",
+            Flag::Sign => "s",
+            Flag::Overflow => "ov",
+            Flag::Mie => "mie",
+            Flag::HalfCarry => "hc",
+            Flag::Elevel => "elevel",
+        })
+    }
+}
+
+impl std::fmt::Display for Reg {
+    /// The register's name, spelled the way [`parse_register`] reads it.
+    ///
+    /// Round-tripping matters: a condition is rendered back into the language it
+    /// was typed in, so what a view shows can be retyped unchanged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reg::Byte(index) => write!(f, "r{index}"),
+            Reg::Word(index) => write!(f, "er{index}"),
+            Reg::Xr(index) => write!(f, "xr{index}"),
+            Reg::Qr(index) => write!(f, "qr{index}"),
+            Reg::Sp => f.write_str("sp"),
+            Reg::Pc => f.write_str("pc"),
+            Reg::Csr => f.write_str("csr"),
+            Reg::Psw => f.write_str("psw"),
+            Reg::Ea => f.write_str("ea"),
+            Reg::Lr => f.write_str("lr"),
+            Reg::Lcsr => f.write_str("lcsr"),
+            Reg::Dsr => f.write_str("dsr"),
+            Reg::Flag(flag) => flag.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Display for Expr {
+    /// The condition, written back in the language it was parsed from.
+    ///
+    /// `&&` and `||` bind looser than a comparison, so a nested one needs
+    /// parentheses to keep its meaning; a comparison's own operands are unary and
+    /// need none.  The output re-parses to the same tree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Number(value) => write!(f, "{value}"),
+            Expr::Register(reg) => reg.fmt(f),
+            Expr::Address(address) => write!(f, "{address:#x}"),
+            Expr::Load(inner) => write!(f, "[{inner}]"),
+            Expr::Hits => f.write_str("hits"),
+            Expr::Compare(left, op, right) => write!(f, "{left} {op} {right}"),
+            Expr::And(left, right) => write!(f, "{} && {}", Group(left), Group(right)),
+            Expr::Or(left, right) => write!(f, "{} || {}", Group(left), Group(right)),
+            Expr::Not(inner) => write!(f, "!{}", Group(inner)),
+        }
+    }
+}
+
+/// A nested expression, parenthesised only where the precedence needs it.
+struct Group<'a>(&'a Expr);
+
+impl std::fmt::Display for Group<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Expr::And(..) | Expr::Or(..) => write!(f, "({})", self.0),
+            other => other.fmt(f),
+        }
+    }
 }
 
 /// A parsed condition.
@@ -1004,6 +1093,63 @@ mod tests {
                 !SYMBOLS[index + 1..].iter().any(|(other, _)| other == name),
                 "{name} is listed twice"
             );
+        }
+    }
+
+    /// A rendering that re-parses to the same tree is what makes a condition
+    /// shown in a view safe to retype.  Comparing trees rather than text is the
+    /// point: `r0 == 1 && c` and `(r0 == 1) && c` are the same condition and
+    /// either spelling is correct.
+    #[test]
+    fn the_rendered_condition_parses_back_to_the_same_tree() {
+        let cases = [
+            "r0 == 1",
+            "c",
+            "z && c",
+            "r0 == 1 && er4 != 0",
+            "r0 == 1 || r1 == 2",
+            "!c",
+            "[0xd180] == 0x41",
+            "hits > 3",
+            "sp == 0xd570",
+            "psw != 0",
+            // The precedence case: the `&&` has to stay inside the `||`.
+            "r0 == 1 && r1 == 2 || r2 == 3",
+            "r0 == 1 || r1 == 2 && r2 == 3",
+            "!(r0 == 1 && r1 == 2)",
+            "elevel == 2",
+            "qr0 == 0",
+            "xr8 == 0x1234",
+            "dsr == 0",
+        ];
+        for source in cases {
+            let parsed = Expr::parse(source).expect(source);
+            let rendered = parsed.to_string();
+            let reparsed = Expr::parse(&rendered)
+                .unwrap_or_else(|err| panic!("{source:?} rendered as {rendered:?}: {err}"));
+            assert_eq!(reparsed, parsed, "{source:?} rendered as {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn a_loose_operator_keeps_its_parentheses() {
+        // Without the grouping this would render as `r0 == 1 && r1 == 2 || r2 == 3`,
+        // which parses as `(r0 == 1 && r1 == 2) || r2 == 3` -- a different test.
+        let expr = Expr::parse("r0 == 1 && (r1 == 2 || r2 == 3)").unwrap();
+        assert_eq!(expr.to_string(), "r0 == 1 && (r1 == 2 || r2 == 3)");
+
+        // A comparison's operands are unary, so they never need wrapping.
+        assert_eq!(Expr::parse("r0 == 1").unwrap().to_string(), "r0 == 1");
+    }
+
+    #[test]
+    fn register_names_are_spelled_the_way_the_parser_reads_them() {
+        for name in [
+            "r0", "r15", "er0", "er14", "xr0", "xr12", "qr0", "qr8", "sp", "pc", "csr", "psw",
+            "ea", "lr", "lcsr", "dsr", "c", "z", "s", "ov", "mie", "hc", "elevel",
+        ] {
+            let reg = parse_register(name).expect(name);
+            assert_eq!(reg.to_string(), name, "round trip for {name}");
         }
     }
 }

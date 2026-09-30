@@ -68,34 +68,15 @@ pub fn disassembly_at_pc(
     after: usize,
 ) -> String {
     let pc = emu.pc();
-    // Walking backwards has to test both possible lengths: the previous
-    // instruction is 2 or 4 bytes, so the one that ends exactly at `start` is the
-    // right answer and simply stepping back by 4 would land mid-instruction.
-    let mut start = pc;
-    for _ in 0..before {
-        let mut found = None;
-        for back in [2u32, 4] {
-            let candidate = start.saturating_sub(back) & !1;
-            if candidate == start {
-                continue;
-            }
-            if candidate + instruction_length(emu, candidate) as u32 == start {
-                found = Some(candidate);
-                break;
-            }
-        }
-        match found {
-            Some(candidate) => start = candidate,
-            // The beginning of the space: nothing further back to show.
-            None => break,
-        }
+    let insns = debugger.disassemble_insns_at_pc(emu, before, after);
+    let mut out = String::new();
+    for insn in &insns {
+        let marker = if insn.address == pc { '>' } else { ' ' };
+        out.push(marker);
+        out.push_str(&insn.listing_line());
+        out.push('\n');
     }
-    disassembly(debugger, emu, start, before + 1 + after)
-}
-
-fn instruction_length(emu: &mut Emu, address: u32) -> usize {
-    let mut read = |at: u32| emu.chipset.bus.read_code_quiet(at);
-    nxu8_asm::disasm::step_length(&mut read, address)
+    out
 }
 
 /// The register file, with the PSW bits decoded and the exception banks listed.
@@ -425,7 +406,7 @@ pub fn state(debugger: &Debugger, emu: &Emu) -> String {
             flags.push_str(" once");
         }
         if let Some(condition) = &breakpoint.condition {
-            flags.push_str(&format!(" if {condition:?}"));
+            flags.push_str(&format!(" if {condition}"));
         }
         out.push_str(&format!(
             "  {} {} {} hits {} stops {}{flags}\n",
@@ -445,7 +426,7 @@ pub fn state(debugger: &Debugger, emu: &Emu) -> String {
     for (id, watch) in debugger.watches() {
         any = true;
         let condition = match &watch.condition {
-            Some(condition) => format!(" if {condition:?}"),
+            Some(condition) => format!(" if {condition}"),
             None => String::new(),
         };
         out.push_str(&format!(
