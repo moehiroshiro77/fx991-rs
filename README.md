@@ -80,6 +80,11 @@ target/release/fx991cnx                   # the clickable window
 
 The window needs a GPU; the CLI does not.
 
+Press `F12` in the window for the debugger — the disassembly, memory, registers,
+stack and breakpoint panels described under [Debugger](#debugger).  It needs
+`data/font.ttf` (monospace); without one the calculator still runs and `F12`
+reports what is missing.
+
 ## Prebuilt archives
 
 Every release carries three archives, one per platform:
@@ -138,6 +143,12 @@ Each script asserts what it demonstrates and exits non-zero when the assertion
 fails, so they double as regression tests for the behaviours they cover.  Full
 documentation, including the four design decisions worth knowing, is in
 [`docs/debugger.md`](docs/debugger.md).
+
+The same engine drives a window: press `F12` in `fx991cnx` for the disassembly,
+memory, registers, stack and breakpoint panels, with `F7`/`F8` to step, `F9` to
+run and a click on a disassembly row to toggle a breakpoint there.  It needs
+`data/font.ttf`, a monospace face; see
+[What you need to supply](#what-you-need-to-supply).
 
 ## License
 

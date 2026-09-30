@@ -209,11 +209,73 @@ A bare symbol is its **address**; the byte stored there needs brackets.  Write
 shows what is stored there, because a memory command's argument is always an
 address.
 
+## The window debugger
+
+The same engine also drives a window, so a session can be driven with the mouse
+and watched while the calculator runs.  It lives in the graphical front end:
+
+```sh
+cargo run --release -p fx991-app      # then press F12
+```
+
+`F12` switches between the calculator and the debugger; `Esc` comes back, so it
+does not quit while the debugger is up.  The panels are arranged the way a native
+debugger arranges them -- disassembly across the top, memory under it, the
+register file and the stack down the right, and the breakpoints along the bottom:
+
+```
++--------------------------------------------------------------+
+| PC 0010000h   tick 0   SP F000h          paused -- breakpoint |
++---------------------------------------------+----------------+
+| Disassembly                                  | Registers      |
+| > 0010000h  00 11  MOV  R0, #0               | PC 0010000h    |
+| * 0010002h  10 22  AND  R2, #16              | R0 11  R1 22   |
++---------------------------------------------+----------------+
+| Memory                                       | Stack          |
+| 000D180h  39 A8 39 00 ...  |9.9..            | SP F000h       |
++---------------------------------------------+----------------+
+| Breakpoints / Watches                                         |
+| * B1  on  0010002h  0 hits                                   |
++--------------------------------------------------------------+
+```
+
+| key | action |
+|---|---|
+| `F7` | step into |
+| `F8` | step over |
+| `F6` | step out |
+| `F5` / `F9` | run |
+| `Space` | pause |
+| `F2` | toggle a breakpoint at the PC |
+| `F3` | point the memory panel at the PC |
+| `F4` | move the keyboard to the next panel |
+| arrows, `PgUp`/`PgDn`, wheel | scroll the focused panel |
+| `Esc` / `F12` | back to the calculator |
+
+Clicking a disassembly row toggles a breakpoint at the address that row shows.
+The address is recomputed from the same window the panel drew, so a click cannot
+land on an address that has since scrolled away.
+
+A run is a blocking loop with no way to interrupt it, so the window runs it in
+slices and regains control between them.  A slice that spends its budget, or that
+finds the ROM parked, is not a stop: a parked machine is the ROM's normal state
+and a timer will wake it, so the run continues -- in larger slices while parked,
+where nothing executes and a smaller slice would buy only more wakeups.
+
+**The font is required and is not bundled.**  Put a monospace face at
+`data/font.ttf`, or pass `--font PATH`.  Monospace is not a preference: every
+panel is a grid of character cells, and a hex dump's columns line up only because
+every glyph has the same advance.  A face that cannot draw ASCII is refused with a
+message.  Without a font the calculator runs normally and `F12` reports what is
+missing.
+
 ## Limits
 
 * **No line editing or history.**  Input is read a line at a time.  That is the
   price of this workspace's zero-dependency policy; the engine and the command
-  language are independent of it, so a terminal library can be added later.
+  language are independent of it, so a terminal library can be added later.  The
+  window debugger is the other answer to this: it needs no typing at all, and its
+  panels cover the commands a session is usually driven with.
 * **A dialogue a key opens cannot be driven by name.**  `SHIFT`+`8` opens the
   unit-conversion menu and the keys inside it will be pressed by the ROM, but the
   debugger has no concept of "the menu is up" -- it presses codes and reads memory,
