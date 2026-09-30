@@ -6,6 +6,9 @@ Cargo.lock
 
 /data/
 
+# A frame the debugger's render test writes when asked for one by hand
+sample-frame.png
+
 # Editor and OS noise
 *.swp
 .DS_Store

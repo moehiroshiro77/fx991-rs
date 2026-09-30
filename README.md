@@ -17,8 +17,10 @@ distributed with this repository. You need a dump of the fx-991CN X **VerF**:
 | `data/rom_verF.bin` | the ROM image | 262 144 bytes, MD5 `47bbf88fb3a9432b311b423f9b766e8f` |
 | `data/skin.rgba` | the face texture | 307×615, 8-bit RGBA, no header — 755 220 bytes |
 | `data/_disas_verF.txt` | optional disassembly listing | only needed by `emu disas --listing` |
+| `data/font.ttf` | optional UI font | only needed by the window debugger; must be monospace |
 
-All three are overridable: `--rom PATH`, `--skin PATH`, `--listing PATH`.
+All four are overridable: `--rom PATH`, `--skin PATH`, `--listing PATH`,
+`--font PATH`.
 
 The debugger needs only the ROM: it decodes instructions from the bytes at an
 address rather than reading the listing, so a patch, a byte written into RAM, or an
@@ -30,6 +32,12 @@ The skin is a bare pixel buffer, row-major RGBA at 307×615 with no header. Deco
 the calculator's own manual image with any PNG library and write the pixels out;
 the emulator checks the length and refuses a file of the wrong size rather than
 rendering garbage.
+
+The font is used only by the window debugger's panels, and it has to be
+**monospace**: every panel is a grid of character cells, and a hex dump's columns
+line up only because each glyph has the same advance.  Any monospace face works;
+the file is read at startup and a face that cannot draw ASCII is refused with a
+message rather than rendering gaps.
 
 Without these files the crate-local unit tests still pass — the integration tests
 skip — so `cargo test` is green on a fresh clone.

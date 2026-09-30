@@ -8,6 +8,7 @@ members = [
     "crates/fx991-chipset",
     "crates/fx991",
     "crates/fx991-ui",
+    "crates/fx991-dbgui",
     "crates/fx991-app",
     "crates/fx991-cli",
     "crates/fx991-dbg",
@@ -32,6 +33,7 @@ fx991-model = { path = "crates/fx991-model" }
 fx991-chipset = { path = "crates/fx991-chipset" }
 fx991 = { path = "crates/fx991" }
 fx991-ui = { path = "crates/fx991-ui" }
+fx991-dbgui = { path = "crates/fx991-dbgui" }
 fx991-dbg = { path = "crates/fx991-dbg" }
 testkit = { path = "crates/testkit" }
 # `fx991-app` is deliberately absent: it is a binary crate at the top of the
