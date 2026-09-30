@@ -64,11 +64,13 @@ pub mod alu;
 pub mod cpu;
 pub mod decode;
 pub mod dispatch_digest;
+pub mod op;
 pub mod opcodes;
 pub mod ops;
 pub mod regs;
 
 pub use cpu::Cpu;
+pub use op::Op;
 pub use regs::{Regs, PSW_C, PSW_ELEVEL, PSW_HC, PSW_MIE, PSW_OV, PSW_S, PSW_Z};
 
 /// Memory as seen by the CPU.

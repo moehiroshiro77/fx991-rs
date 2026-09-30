@@ -133,20 +133,42 @@ impl Regs {
     /// Read `size` bytes starting at byte register `index`, little-endian.
     ///
     /// `size == 0` means "immediate operand" and is handled by the caller.
+    ///
+    /// One- and two-byte operands are most of what the opcode table asks for, so
+    /// they are handled without a loop; wider registers take the general path.
     #[inline]
     pub fn reg(&self, index: usize, size: usize) -> u64 {
-        let mut value = 0u64;
-        for bx in 0..size {
-            value |= (self.r[(index + bx) & 0xF] as u64) << (bx * 8);
+        match size {
+            1 => self.r[index & 0xF] as u64,
+            2 => {
+                let low = self.r[index & 0xF] as u64;
+                let high = self.r[(index + 1) & 0xF] as u64;
+                low | (high << 8)
+            }
+            _ => {
+                let mut value = 0u64;
+                for bx in 0..size {
+                    value |= (self.r[(index + bx) & 0xF] as u64) << (bx * 8);
+                }
+                value
+            }
         }
-        value
     }
 
     #[inline]
     /// Write `size` bytes starting at byte register `index`, little-endian.
     pub fn set_reg(&mut self, index: usize, size: usize, value: u64) {
-        for bx in 0..size {
-            self.r[(index + bx) & 0xF] = (value >> (bx * 8)) as u8;
+        match size {
+            1 => self.r[index & 0xF] = value as u8,
+            2 => {
+                self.r[index & 0xF] = value as u8;
+                self.r[(index + 1) & 0xF] = (value >> 8) as u8;
+            }
+            _ => {
+                for bx in 0..size {
+                    self.r[(index + bx) & 0xF] = (value >> (bx * 8)) as u8;
+                }
+            }
         }
     }
 

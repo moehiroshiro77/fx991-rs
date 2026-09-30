@@ -416,7 +416,16 @@ impl Emu {
 
     // -------------------------------------------------------------- stepping
     /// Execute one tick, consulting any armed breakpoints.
+    ///
+    /// With nothing armed there is no hook to run and no hit to file, so this is
+    /// the chipset's own tick.  The front ends call this once per instruction, so
+    /// the empty-breakpoint case is worth not paying a closure and a dynamic call
+    /// for.
     pub fn step(&mut self) -> TickOutcome {
+        if self.breakpoints.is_empty() {
+            self.ticks += 1;
+            return self.chipset.tick(None);
+        }
         let mut no_extra = |_pc: u32, _regs: &Regs, _bus: &mut fx991_bus::Bus| false;
         self.step_with_bus(&mut no_extra)
     }

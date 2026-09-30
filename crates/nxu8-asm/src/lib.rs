@@ -119,10 +119,10 @@ pub fn encode_expecting(
     let entry = dispatch()[base as usize].ok_or(AsmError::UnknownBase(base))?;
 
     if let Some(expected) = expect {
-        if entry.handler != expected {
+        if entry.handler.name() != expected {
             return Err(AsmError::WrongHandler {
                 base,
-                actual: entry.handler,
+                actual: entry.handler.name(),
                 expected,
             });
         }

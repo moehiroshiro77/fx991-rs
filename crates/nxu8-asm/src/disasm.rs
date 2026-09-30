@@ -49,6 +49,7 @@
 #![warn(missing_docs)]
 
 use nxu8_core::decode::{dispatch, H_DS, H_IA, H_ST, H_TI};
+use nxu8_core::Op;
 
 /// How wide the mnemonic column is, matching the listing's alignment.
 const MNEMONIC_WIDTH: usize = 8;
@@ -230,17 +231,17 @@ pub fn disassemble_one(read: &mut dyn CodeRead, address: u32) -> Insn {
     Insn {
         address,
         bytes: bytes_at(read, address, length),
-        text: render(entry.handler, entry.hint, word, long_imm, address),
+        text: render(entry.handler.name(), entry.hint, word, long_imm, address),
         length,
-        handler: Some(entry.handler),
+        handler: Some(entry.handler.name()),
         kind: if entry.hint & H_DS != 0 {
             InsnKind::DsrPrefix
-        } else if entry.handler.starts_with("OP_CR") {
+        } else if matches!(entry.handler, Op::CrR | Op::CrEa) {
             InsnKind::Coprocessor
         } else {
             InsnKind::Normal
         },
-        is_call: entry.handler == "OP_BL",
+        is_call: entry.handler == Op::Bl,
     }
 }
 

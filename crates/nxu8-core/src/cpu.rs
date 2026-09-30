@@ -26,7 +26,8 @@
 //! * `H_DS` loops: a DSR prefix decodes a further instruction.
 
 use crate::decode::{dispatch, H_DS, H_TI, H_WB};
-use crate::ops::{self, ctrl::ControlSink};
+use crate::op::Op;
+use crate::ops::ctrl::ControlSink;
 use crate::regs::{Regs, PSW_Z};
 use crate::{Memory, Unimplemented};
 
@@ -121,13 +122,9 @@ impl Cpu {
         opcode
     }
 
-    /// Execute one instruction.  Returns the handler name, or `None` when the
+    /// Execute one instruction.  Returns the handler, or `None` when the
     /// opcode was unmapped and simply skipped.
-    pub fn step<B: Memory, S: ControlSink>(
-        &mut self,
-        bus: &mut B,
-        sink: &mut S,
-    ) -> Option<&'static str> {
+    pub fn step<B: Memory, S: ControlSink>(&mut self, bus: &mut B, sink: &mut S) -> Option<Op> {
         // `reg_dsr` only affects the current instruction.
         self.regs.dsr = 0;
 
@@ -148,15 +145,31 @@ impl Cpu {
                 0
             };
 
-            for ix in 0..2 {
-                let (size, mask, shift) = entry.operands[ix];
-                let op = &mut self.operands[ix];
-                op.value = ((self.opcode >> shift) & mask) as u64;
-                op.register_index = op.value as usize;
-                op.register_size = size as usize;
-                if size != 0 {
-                    op.value = self.regs.reg(op.register_index, size as usize);
-                }
+            // Both operand slots are decoded explicitly rather than in a loop:
+            // there are exactly two, and writing them out lets the shifts and
+            // masks fold into constants per dispatch entry.
+            let (size0, mask0, shift0) = entry.operands[0];
+            let op = &mut self.operands[0];
+            op.value = ((self.opcode >> shift0) & mask0) as u64;
+            op.register_index = op.value as usize;
+            op.register_size = size0 as usize;
+
+            let (size1, mask1, shift1) = entry.operands[1];
+            let op = &mut self.operands[1];
+            op.value = ((self.opcode >> shift1) & mask1) as u64;
+            op.register_index = op.value as usize;
+            op.register_size = size1 as usize;
+
+            // `register_size == 0` marks an immediate, whose value is the masked
+            // opcode bits already written above; only a register operand is
+            // replaced by the register's contents.
+            if size0 != 0 {
+                let op = &mut self.operands[0];
+                op.value = self.regs.reg(op.register_index, size0 as usize);
+            }
+            if size1 != 0 {
+                let op = &mut self.operands[1];
+                op.value = self.regs.reg(op.register_index, size1 as usize);
             }
 
             self.hint = entry.hint;
@@ -164,10 +177,7 @@ impl Cpu {
             self.flags_in = self.regs.psw();
             self.flags_out = PSW_Z;
 
-            if !ops::run(self, bus, sink, entry.handler) {
-                self.ticks += 1;
-                return None;
-            }
+            entry.handler.run(self, bus, sink);
             executed = entry.handler;
 
             self.regs.set_psw(

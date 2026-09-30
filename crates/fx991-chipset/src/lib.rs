@@ -407,32 +407,48 @@ impl Chipset {
     /// consistent with what the CPU is about to execute.
     pub fn tick(&mut self, mut pre_execute: Option<PreExecute>) -> TickOutcome {
         // --- for peripheral in peripherals: peripheral.Tick ---------------
+        //
+        // The peripherals are ticked in the reference order.  The keyboard's
+        // tick is a no-op until a key is held -- it raises its interrupt only
+        // when `has_input` is set -- and this runs once per instruction, so the
+        // call is guarded rather than reached through two `RefCell` borrows that
+        // can do nothing.  The order is otherwise unchanged.
         self.screen.borrow_mut().tick();
-        self.keyboard
-            .borrow_mut()
-            .tick(&mut self.interrupts.borrow_mut());
+        if self.keyboard.borrow().has_input {
+            self.keyboard
+                .borrow_mut()
+                .tick(&mut self.interrupts.borrow_mut());
+        }
         {
-            let timer = Rc::clone(&self.timer);
-            let interrupts = Rc::clone(&self.interrupts);
-            timer.borrow_mut().tick(&mut interrupts.borrow_mut());
+            let mut timer = self.timer.borrow_mut();
+            let mut interrupts = self.interrupts.borrow_mut();
+            timer.tick(&mut interrupts);
         }
 
         // --- a standby write takes effect before the interrupt pass ---------
-        if let Some(request) = self.standby.borrow_mut().take() {
+        let standby = self.standby.borrow_mut().take();
+        if let Some(request) = standby {
             Misc::apply(request, &mut self.interrupts.borrow_mut());
         }
 
         // --- if pending_interrupt_count: AcceptInterrupt ------------------
+        // Read through the same borrow the accept path will need, so a stopped
+        // machine does not pay for a second borrow of the controller.
         if self.interrupts.borrow().pending_count > 0 {
             self.accept_interrupt();
         }
 
         // --- for peripheral in peripherals: peripheral.TickAfterInterrupts -
-        let interrupts = self.interrupts.borrow();
-        self.timer.borrow_mut().tick_after_interrupts(&interrupts);
-        drop(interrupts);
+        {
+            let mut timer = self.timer.borrow_mut();
+            let interrupts = self.interrupts.borrow();
+            timer.tick_after_interrupts(&interrupts);
+        }
 
-        if self.interrupts.borrow().run_mode != RunMode::Run {
+        // One borrow decides both whether the machine is running and, if it is,
+        // which mode it is in.
+        let run_mode = self.interrupts.borrow().run_mode;
+        if run_mode != RunMode::Run {
             self.saw_stop = true;
         }
 
@@ -444,7 +460,7 @@ impl Chipset {
             }
         }
 
-        if self.interrupts.borrow().run_mode != RunMode::Run {
+        if run_mode != RunMode::Run {
             return TickOutcome::Stopped;
         }
 
@@ -461,7 +477,7 @@ impl Chipset {
             exception_level,
         };
         match self.cpu.step(&mut self.bus, &mut sink) {
-            Some(handler) => TickOutcome::Executed(handler),
+            Some(handler) => TickOutcome::Executed(handler.name()),
             None => TickOutcome::Skipped,
         }
     }

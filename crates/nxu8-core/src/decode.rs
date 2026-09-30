@@ -19,6 +19,8 @@
 
 use std::sync::OnceLock;
 
+use crate::op::Op;
+
 /// The raw table, one row per decoded opcode pattern.
 pub use crate::opcodes::OPCODE_SOURCES;
 
@@ -41,7 +43,12 @@ pub const H_WB: u32 = 0x0040;
 /// One row of the source table.
 #[derive(Debug, Clone, Copy)]
 pub struct OpcodeSource {
-    /// Name of the handler in [`crate::ops`].
+    /// Name of the handler this row runs.
+    ///
+    /// The generated table spells handlers out as text because that text is
+    /// shared with the disassembler and the reference listing.  The dispatcher
+    /// built from this table resolves it to an [`Op`] once, so the
+    /// per-instruction path never compares strings.
     pub handler: &'static str,
     /// Hint flags; the `H_*` constants in this module.
     pub hint: u32,
@@ -79,10 +86,16 @@ impl OpcodeSource {
 }
 
 /// A resolved dispatch slot.
+///
+/// Deliberately small: this table is 65536 entries and is walked once per
+/// instruction, so every byte here is a byte the fetch has to bring in.  The
+/// handler is a tag rather than a name for the same reason -- the name is only
+/// needed by the tools that *print* an instruction, and they go through
+/// [`Op::name`].
 #[derive(Debug, Clone, Copy)]
 pub struct Dispatch {
-    /// Which handler in [`crate::ops`] runs for this opcode.
-    pub handler: &'static str,
+    /// Which handler runs for this opcode.
+    pub handler: Op,
     /// Hint flags, copied from the source row.
     pub hint: u32,
     /// Operand descriptors, copied from the source row.
@@ -104,6 +117,15 @@ fn build_dispatch() -> Box<[Option<Dispatch>]> {
     for source in OPCODE_SOURCES {
         let varying = source.varying_bits();
 
+        // Resolved once, here, rather than per instruction: the name in the
+        // table is the tooling's spelling and the tag is what runs.
+        let handler = Op::from_name(source.handler).unwrap_or_else(|| {
+            panic!(
+                "the opcode table names an unknown handler: {}",
+                source.handler
+            )
+        });
+
         // Enumerate every combination of the varying bits.
         let mut permutations: Vec<u16> = vec![source.opcode];
         let mut checkbit = 0x8000u16;
@@ -116,7 +138,7 @@ fn build_dispatch() -> Box<[Option<Dispatch>]> {
         }
 
         let entry = Dispatch {
-            handler: source.handler,
+            handler,
             hint: source.hint,
             operands: source.operands,
         };
@@ -165,7 +187,14 @@ mod tests {
                     let _ = write!(
                         text,
                         "{}|{}|{},{},{}|{},{},{};",
-                        entry.handler, entry.hint, s0, m0, h0, s1, m1, h1
+                        entry.handler.name(),
+                        entry.hint,
+                        s0,
+                        m0,
+                        h0,
+                        s1,
+                        m1,
+                        h1
                     );
                 }
             }
@@ -205,15 +234,33 @@ mod tests {
 
     #[test]
     fn every_mapped_opcode_names_a_handler_we_implement() {
-        for (opcode, slot) in dispatch().iter().enumerate() {
-            if let Some(entry) = slot {
-                assert!(
-                    crate::ops::ALL_HANDLERS.contains(&entry.handler),
-                    "opcode {opcode:#06x} maps to unknown handler {}",
-                    entry.handler
-                );
-            }
+        // Every row of the generated table must carry a tag `Op` defines, which
+        // the type system already guarantees; what this pins is the reverse
+        // direction -- that no `Op` is left with no row naming it, which would
+        // mean a handler that can never be reached.
+        let mut named = [false; Op::ALL.len()];
+        for slot in dispatch().iter().flatten() {
+            let index = Op::ALL
+                .iter()
+                .position(|op| *op == slot.handler)
+                .expect("the tag came from Op");
+            named[index] = true;
         }
+        for (index, seen) in named.iter().enumerate() {
+            assert!(seen, "no opcode decodes to {}", Op::ALL[index].name());
+        }
+    }
+
+    #[test]
+    fn the_tags_and_their_names_agree_with_the_table_text() {
+        // The generated table is written with names and the dispatcher resolves
+        // them through `Op::from_name`, so this is the guard that the round trip
+        // is exact: a name the enum cannot resolve would panic when the table is
+        // first built, which is a long way from the typo that caused it.
+        for op in Op::ALL {
+            assert_eq!(Op::from_name(op.name()), Some(*op));
+        }
+        assert_eq!(Op::from_name("OP_NOT_A_HANDLER"), None);
     }
 
     #[test]
@@ -221,19 +268,19 @@ mod tests {
         let table = dispatch();
         let handler = |word: u16| table[word as usize].unwrap().handler;
 
-        assert_eq!(handler(0xFE8F), "OP_NOP");
-        assert_eq!(handler(0xFE1F), "OP_RT");
-        assert_eq!(handler(0xFE0F), "OP_RTI");
-        assert_eq!(handler(0xFE2F), "OP_INC_EA");
-        assert_eq!(handler(0xFE3F), "OP_DEC_EA");
-        assert_eq!(handler(0xFFFF), "OP_BRK");
-        assert_eq!(handler(0xF00E), "OP_POP"); // POP R0
-        assert_eq!(handler(0xF01E), "OP_POP"); // POP ER0
-        assert_eq!(handler(0xE100), "OP_ADDSP");
+        assert_eq!(handler(0xFE8F), Op::Nop);
+        assert_eq!(handler(0xFE1F), Op::Rt);
+        assert_eq!(handler(0xFE0F), Op::Rti);
+        assert_eq!(handler(0xFE2F), Op::IncEa);
+        assert_eq!(handler(0xFE3F), Op::DecEa);
+        assert_eq!(handler(0xFFFF), Op::Brk);
+        assert_eq!(handler(0xF00E), Op::Pop); // POP R0
+        assert_eq!(handler(0xF01E), Op::Pop); // POP ER0
+        assert_eq!(handler(0xE100), Op::Addsp);
         // `POP PC` is the 0xF08E row with list bit 1 set: 0xF28E, i.e. `8E F2`.
-        assert_eq!(handler(0xF28E), "OP_POPL");
+        assert_eq!(handler(0xF28E), Op::Popl);
         // `PUSH LR` is the 0xF0CE row with list bit 3 set: 0xF8CE, i.e. `CE F8`.
-        assert_eq!(handler(0xF8CE), "OP_PUSHL");
+        assert_eq!(handler(0xF8CE), Op::Pushl);
     }
 
     #[test]
@@ -256,6 +303,6 @@ mod tests {
     #[test]
     fn the_first_row_wins_for_an_opcode_claimed_twice() {
         // 0xFFFF is BRK; nothing later may steal it.
-        assert_eq!(dispatch()[0xFFFF].unwrap().handler, "OP_BRK");
+        assert_eq!(dispatch()[0xFFFF].unwrap().handler, Op::Brk);
     }
 }
