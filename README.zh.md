@@ -29,6 +29,20 @@
 **缺这些文件也能跑测试**：crate 内部的单元测试照常通过，集成测试会跳过，所以刚
 clone 下来 `cargo test` 是全绿的。
 
+### ROM 下载地址
+
+VerF 镜像的 dump 可以从这里获取：
+
+**[Casio fx-991CN X (VerF) ROM](https://gist.github.com/moehiroshiro77/8d903c3c5ac329091da52cab4f44ef69)**
+
+> Disclaimer: This ROM image is copyrighted by CASIO COMPUTER CO., LTD. and is
+> provided solely for research and educational purposes.  I do not claim ownership
+> or affiliation with Casio.  If requested by the copyright holder, I will promptly
+> remove this material.
+
+该下载仅供研究与教学使用，与上面的免责声明一致。它不属于本仓库，也不在本项目的许可
+范围内。如果你是版权方并要求移除，请在 gist 上提出。
+
 ## 构建与运行
 
 需要 **Rust 1.90**。这个下限来自图形前端——`wgpu` 要求 1.87，它依赖的
@@ -50,6 +64,26 @@ target/release/fx991cnx                   # 可点击的窗口
 ```
 
 窗口需要显卡，命令行工具不需要。
+
+## 预编译包
+
+每次 release 提供三个包，每平台一个：
+
+| 包 | 平台 |
+|---|---|
+| fx991cnx-VERSION-windows-x86_64.zip | Windows 10 及以上，x86_64 |
+| fx991cnx-VERSION-linux-x86_64.tar.gz | Linux，x86_64；窗口需要常规的 X11 或 Wayland 库 |
+| fx991cnx-VERSION-macos-universal.tar.gz | macOS 11 及以上，Intel 与 Apple 芯片合并在一个二进制里 |
+
+每个包内含 `emu`、`fx991cnx` 和许可证。**都不含固件**——把 `data/rom_verF.bin`
+和 `data/skin.rgba` 放到二进制旁边，或用 `--rom`、`--skin` 指定，与从源码构建时
+完全一样。
+
+release 页面另附 SHA256SUMS.txt，把下载的文件和它放在同一目录后可用
+`sha256sum --check SHA256SUMS.txt` 校验。
+
+每次 release 的说明由 `scripts/release-notes.sh` 从提交历史生成，只用 git 和
+shell、没有依赖。完整流程见 [`docs/releasing.md`](docs/releasing.md)。
 
 ## 调试器
 

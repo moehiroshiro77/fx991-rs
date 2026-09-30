@@ -1,0 +1,295 @@
+name: Release
+
+# Pushing a version tag, for example
+#
+#     git tag -a v0.1.0 -m "fx991cnx 0.1.0"
+#     git push origin v0.1.0
+#
+# builds the archives, writes the release notes from the commit history, and
+# publishes the GitHub release.  scripts/tag-release.sh cuts the tag and checks
+# the version first; docs/releasing.md has the whole procedure.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (must already exist)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The archives publish binaries nobody can rebuild by hand before trusting, so
+  # the suite runs first and nothing is built if it fails.  Integration tests that
+  # need the ROM skip: the firmware is not in this repository.
+  #
+  # No RUSTFLAGS=-D warnings here, unlike the CI workflow: a warning in a
+  # dependency published after the release branch was cut must not be able to
+  # block a release.  Lints are CI's job, on every push.
+  verify:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux windowing dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libvulkan-dev
+      - run: cargo test --workspace
+
+  # The archive names carry the version, so the notes are generated before the
+  # binaries: the names are not known until they are.  They are derived in one
+  # place only -- scripts/release-notes.sh, which reads the version out of the
+  # tag -- rather than formatted again in each job.
+  notes:
+    name: release notes
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      # Tags and the whole history: the notes are a range between two tags.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Generate the notes from the commit history
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: bash scripts/release-notes.sh "$TAG" > RELEASE_NOTES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: notes
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+          - name: linux-x86_64
+            os: ubuntu-latest
+          # Intel and Apple silicon in one download.  The two binaries are built
+          # separately and joined with lipo, which is the only way to get a
+          # universal one out of cargo.
+          - name: macos-universal
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Add the macOS targets
+        if: matrix.name == 'macos-universal'
+        run: rustup target add x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux windowing dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libvulkan-dev
+
+      # The version has to be committed before it is tagged: it is compiled in, so
+      # a tag that disagrees with it ships a binary reporting the wrong number.
+      - name: Check the tag against the workspace version
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::the tag is $TAG but Cargo.toml declares $version: bump [workspace.package] version, commit it, and tag that commit"
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release -p fx991-cli -p fx991-app
+
+      - name: Build for Intel macOS
+        if: matrix.name == 'macos-universal'
+        run: cargo build --release --target x86_64-apple-darwin -p fx991-cli -p fx991-app
+
+      # A universal binary is the one thing here cargo cannot produce on its own,
+      # and lipo is silent about a mistake: it will happily write a binary with
+      # one architecture in it.  So the result is checked, not assumed.
+      - name: Join the two macOS binaries
+        if: matrix.name == 'macos-universal'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in fx991cnx emu; do
+            lipo -create -output "$name" \
+              "target/x86_64-apple-darwin/release/$name" "target/release/$name"
+            chmod +x "$name"
+            archs=$(lipo -archs "$name")
+            echo "$name: $archs"
+            case "$archs" in
+              *x86_64*) ;;
+              *) echo "::error::$name is missing its x86_64 slice"; exit 1 ;;
+            esac
+            case "$archs" in
+              *arm64*) ;;
+              *) echo "::error::$name is missing its arm64 slice"; exit 1 ;;
+            esac
+          done
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          dist="$PWD/dist"
+          rm -rf staging dist
+          mkdir -p staging/data dist
+
+          case "$PLATFORM" in
+            windows-x86_64) cp target/release/fx991cnx.exe target/release/emu.exe staging/ ;;
+            macos-universal) cp fx991cnx emu staging/ ;;
+            *) cp target/release/fx991cnx target/release/emu staging/ ;;
+          esac
+          chmod +x staging/* 2> /dev/null || true
+          cp LICENSE README.md README.zh.md staging/
+
+          # The archive is built from inside the staging directory so its entries
+          # are the bare names a downloader sees, and the destination is absolute
+          # so no path in this step walks up out of the workspace.
+          cd staging
+          case "$PLATFORM" in
+            windows-x86_64)
+              # 7-Zip is a native Windows program, so it is handed a Windows path.
+              if command -v 7z > /dev/null 2>&1; then
+                seven_zip=7z
+              elif [ -x "/c/Program Files/7-Zip/7z.exe" ]; then
+                seven_zip="/c/Program Files/7-Zip/7z.exe"
+              else
+                echo "::error::this runner has no 7-Zip"
+                exit 1
+              fi
+              out="$dist/fx991cnx-$version-$PLATFORM.zip"
+              if command -v cygpath > /dev/null 2>&1; then
+                out=$(cygpath -w "$out")
+              fi
+              "$seven_zip" a -tzip -mx=9 "$out" . > /dev/null
+              ;;
+            *)
+              tar -czf "$dist/fx991cnx-$version-$PLATFORM.tar.gz" .
+              ;;
+          esac
+
+      # Unpacking what was just written and running it is the only check that
+      # covers the archive itself: the tar step can drop the executable bit, and
+      # a zip can be truncated.  The window needs a GPU and CI has none, so
+      # asking the command line for its usage text is what a runner can prove --
+      # that the binary starts on this platform and the archive carries it.
+      - name: Smoke test the archive
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          case "$PLATFORM" in
+            windows-x86_64) archive="dist/fx991cnx-$version-$PLATFORM.zip" ;;
+            *) archive="dist/fx991cnx-$version-$PLATFORM.tar.gz" ;;
+          esac
+          rm -rf unpacked
+          mkdir unpacked
+          case "$PLATFORM" in
+            windows-x86_64)
+              if command -v 7z > /dev/null 2>&1; then
+                seven_zip=7z
+              else
+                seven_zip="/c/Program Files/7-Zip/7z.exe"
+              fi
+              "$seven_zip" x -y -ounpacked "$archive" > /dev/null
+              emu=./emu.exe
+              ;;
+            *)
+              tar -xzf "$archive" -C unpacked
+              emu=./emu
+              ;;
+          esac
+          out=$(cd unpacked && "$emu" --help)
+          printf '%s\n' "$out" | head -3
+          case "$out" in
+            *usage:*) ;;
+            *) echo "::error::the packaged emulator did not print its usage text"; exit 1 ;;
+          esac
+          for expected in LICENSE README.md README.zh.md; do
+            if [ ! -f "unpacked/$expected" ]; then
+              echo "::error::$expected is missing from the archive"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      # The checksums are taken here, once, from the bytes that are about to be
+      # uploaded -- not per platform while the archives are still being built.
+      # That keeps one definition of what a checksum means for this release, and
+      # it is on the one runner where sha256sum is guaranteed to be present.
+      - name: Checksum the archives
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp artifacts/*.zip artifacts/*.tar.gz dist/
+          cd dist
+          # Bare names, so the manifest is the one a downloader can check with
+          # sha256sum --check in the directory the files landed in.
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      # Rerunning the same tag has to replace what is there rather than fail,
+      # which is what makes a release repeatable after a runner hiccup.  A tag
+      # with a suffix such as -rc.1 is published as a prerelease.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "fx991cnx $TAG" \
+              --notes-file artifacts/RELEASE_NOTES.md \
+              $prerelease
+          fi

@@ -34,6 +34,22 @@ rendering garbage.
 Without these files the crate-local unit tests still pass — the integration tests
 skip — so `cargo test` is green on a fresh clone.
 
+### Where to get the ROM
+
+A dump of the VerF image is available here:
+
+**[Casio fx-991CN X (VerF) ROM](https://gist.github.com/moehiroshiro77/8d903c3c5ac329091da52cab4f44ef69)**
+
+> Disclaimer: This ROM image is copyrighted by CASIO COMPUTER CO., LTD. and is
+> provided solely for research and educational purposes.  I do not claim ownership
+> or affiliation with Casio.  If requested by the copyright holder, I will promptly
+> remove this material.
+
+The download is offered solely for research and educational purposes, as that
+disclaimer says.  It is not part of this repository and is not covered by its
+licence.  If you are the copyright holder and want it taken down, the gist is the
+place to say so.
+
 ## Build and run
 
 Needs **Rust 1.90**.  That floor comes from the graphical front end — `wgpu` needs
@@ -55,6 +71,28 @@ target/release/fx991cnx                   # the clickable window
 ```
 
 The window needs a GPU; the CLI does not.
+
+## Prebuilt archives
+
+Every release carries three archives, one per platform:
+
+| archive | platform |
+|---|---|
+| fx991cnx-VERSION-windows-x86_64.zip | Windows 10 or later, x86_64 |
+| fx991cnx-VERSION-linux-x86_64.tar.gz | Linux, x86_64; the window needs the usual X11 or Wayland libraries |
+| fx991cnx-VERSION-macos-universal.tar.gz | macOS 11 or later, Intel and Apple silicon in one binary |
+
+Each holds `emu`, `fx991cnx` and the licence.  **None of them includes the
+firmware** -- put `data/rom_verF.bin` and `data/skin.rgba` beside the binaries, or
+point at them with `--rom` and `--skin`, exactly as for a build from source.
+
+A SHA256SUMS.txt is attached to the release; check a download with
+`sha256sum --check SHA256SUMS.txt` in the directory you saved it to.
+
+The notes on each release are generated from the commit history by
+`scripts/release-notes.sh`, which is a few lines of git and the shell and no
+dependency.  [`docs/releasing.md`](docs/releasing.md) describes the whole
+procedure.
 
 ## Debugger
 
