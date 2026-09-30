@@ -277,6 +277,10 @@ jobs:
       # Rerunning the same tag has to replace what is there rather than fail,
       # which is what makes a release repeatable after a runner hiccup.  A tag
       # with a suffix such as -rc.1 is published as a prerelease.
+      #
+      # The repository is named explicitly: this job never checks the source out
+      # -- it works from the artifacts alone -- so there is no clone for gh to
+      # infer it from, and it fails with "not a git repository" without this.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -285,10 +289,11 @@ jobs:
           set -euo pipefail
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
               --title "fx991cnx $TAG" \
               --notes-file artifacts/RELEASE_NOTES.md \
               $prerelease
