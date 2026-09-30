@@ -49,5 +49,6 @@ pub mod ui;
 pub use canvas::Canvas;
 pub use font::{FontError, FontSet};
 pub use layout::{Layout, Panel, Rect, MIN_HEIGHT, MIN_WIDTH};
+pub use panels::{stop_text, Content, Marker, Row, Span};
 pub use theme::{Metrics, Rgba};
-pub use ui::DebuggerUi;
+pub use ui::{Action, DebuggerUi};

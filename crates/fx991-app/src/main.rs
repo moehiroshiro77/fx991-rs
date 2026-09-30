@@ -11,13 +11,13 @@
 
 //! A wgpu window showing the calculator's face, with clickable keys.
 //!
-//! `text
+//! ```text
 //! cargo run --release -p fx991-app
-//! `
+//! ```
 //!
 //! Left-click a key to press it, right-click to latch it down (so you can hold
 //! `SHIFT` and then click something else), and click `ON` to power-cycle.
-//! `+`/`-` zoom, `Esc` quits.
+//! `+`/`-` zoom, `Esc` quits, and `F12` switches to the debugger.
 //!
 //! The design follows  §M3.  The whole face is composed on the
 //! CPU by `fx991-ui` and uploaded as one texture per changed frame -- option (a)
@@ -30,9 +30,14 @@
 //! * the sampler is `Nearest`, because the display is a dot matrix and
 //!   interpolating it makes the edges mush.
 //!
-//! Everything testable without a GPU lives in [`input`] and in `fx991-ui`; this
-//! file is the glue.
+//! The debugger reuses that same path: `fx991-dbgui` composes its panels into an
+//! `fx991_ui::Frame` too, so the mode switch changes what is uploaded and nothing
+//! else.  See [`debug`].
+//!
+//! Everything testable without a GPU lives in [`input`], [`debug`], and in
+//! `fx991-ui`; this file is the glue.
 
+mod debug;
 mod gpu;
 mod input;
 mod window;
@@ -43,12 +48,14 @@ use std::time::Instant;
 
 use fx991::throttle::Throttle;
 use fx991::Emu;
+use fx991_dbgui::{DebuggerUi, FontSet};
 use fx991_ui::{Renderer, NATURAL_HEIGHT, NATURAL_WIDTH};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton as WinitButton, WindowEvent};
+use winit::event::{ElementState, MouseButton as WinitButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowButtons, WindowId};
 
+use debug::{DebugSession, Key as DebugKey};
 use gpu::{Gpu, SurfaceProblem};
 use input::{Action, Mouse, MouseButton};
 use window::block_maximise;
@@ -63,29 +70,34 @@ use zoom::{
 /// supplies, so the binary carries no copyrighted content.
 const DEFAULT_ROM: &str = "data/rom_verF.bin";
 const DEFAULT_SKIN: &str = "data/skin.rgba";
+const DEFAULT_FONT: &str = "data/font.ttf";
 
 /// What the command line asked for.
 struct Options {
     rom: std::path::PathBuf,
     skin: std::path::PathBuf,
+    /// The debugger's font, or `None` to use the default path.
+    font: Option<std::path::PathBuf>,
     /// The zoom in quarter steps, or `None` to fit the screen.
     quarters: Option<u32>,
 }
 
 const USAGE: &str = "fx991cnx -- a clickable fx-991CN X
 
-usage: fx991cnx [ZOOM] [--rom PATH] [--skin PATH]
+usage: fx991cnx [ZOOM] [--rom PATH] [--skin PATH] [--font PATH]
 
   ZOOM        0.5 to 8 (default: fit the screen)
   --rom PATH  ROM image           (default: data/rom_verF.bin)
   --skin PATH face texture, RGBA  (default: data/skin.rgba)
+  --font PATH debugger font, TTF  (default: data/font.ttf, monospace)
 
-Keys: left-click presses, right-click latches, +/- zoom, Esc quits.";
+Keys: left-click presses, right-click latches, +/- zoom, F12 debugger, Esc quits.";
 
 fn parse_args() -> Result<Options, String> {
     let mut options = Options {
         rom: DEFAULT_ROM.into(),
         skin: DEFAULT_SKIN.into(),
+        font: None,
         quarters: None,
     };
     let mut args = std::env::args().skip(1);
@@ -93,6 +105,7 @@ fn parse_args() -> Result<Options, String> {
         match arg.as_str() {
             "--rom" => options.rom = args.next().ok_or("--rom needs a path")?.into(),
             "--skin" => options.skin = args.next().ok_or("--skin needs a path")?.into(),
+            "--font" => options.font = Some(args.next().ok_or("--font needs a path")?.into()),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -118,12 +131,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skin = fx991_ui::Skin::from_file(&options.skin)
         .map_err(|err| format!("could not load {}: {err}", options.skin.display()))?;
 
+    // The debugger's font is optional: without it the calculator runs and only
+    // `F12` is unavailable, which is better than refusing to start.
+    let font_path = options.font.clone().unwrap_or_else(|| DEFAULT_FONT.into());
+    let font = match FontSet::from_file(&font_path) {
+        Ok(font) => Some(font),
+        Err(err) => {
+            println!(
+                "note: no debugger font at {} ({err}); F12 will report it",
+                font_path.display()
+            );
+            None
+        }
+    };
+
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(rom, skin, options.quarters);
+    let mut app = App::new(rom, skin, font, options.quarters);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
+
+/// Which face the window is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The calculator, as the user sees it.
+    Calculator,
+    /// The debugger's panels.
+    Debugger,
+}
+
 /// The calculator plus its pacing and input state.
 struct Machine {
     emulator: Emu,
@@ -203,12 +240,22 @@ impl Machine {
 struct App {
     rom: Vec<u8>,
     skin: fx991_ui::Skin,
+    /// The debugger's font, or `None` when the user has not supplied one.
+    font: Option<FontSet>,
     /// `None` means "fit the screen"; `Some` is an explicit user choice.
     /// In quarter steps.
     quarters: Option<u32>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     machine: Option<Machine>,
+    /// The debugger, once it has been entered.
+    ///
+    /// Built lazily so the font is loaded and the panels are laid out only when
+    /// someone asks for them, and kept so breakpoints and scroll positions
+    /// survive leaving and re-entering.
+    debug: Option<DebugSession>,
+    /// Which face the window is showing.
+    mode: Mode,
     /// Last cursor position, in *window* pixels.
     cursor: (f64, f64),
     /// The frame size the GPU texture currently holds.
@@ -216,14 +263,22 @@ struct App {
 }
 
 impl App {
-    fn new(rom: Vec<u8>, skin: fx991_ui::Skin, quarters: Option<u32>) -> Self {
+    fn new(
+        rom: Vec<u8>,
+        skin: fx991_ui::Skin,
+        font: Option<FontSet>,
+        quarters: Option<u32>,
+    ) -> Self {
         Self {
             rom,
             skin,
+            font,
             quarters,
             window: None,
             gpu: None,
             machine: None,
+            debug: None,
+            mode: Mode::Calculator,
             cursor: (0.0, 0.0),
             frame_size: (NATURAL_WIDTH, NATURAL_HEIGHT),
         }
@@ -238,7 +293,31 @@ impl App {
         ) else {
             return;
         };
-        let frame = machine.renderer.render(&mut machine.emulator.chipset);
+
+        let frame = match self.mode {
+            Mode::Calculator => machine.renderer.render(&mut machine.emulator.chipset),
+            Mode::Debugger => {
+                let Some(session) = self.debug.as_mut() else {
+                    return;
+                };
+                let size = window.inner_size();
+                // The frame is composed at the window's size, so a window larger
+                // than the device's texture limit would fail to upload.  The
+                // window is clamped when the mode is entered; this is the belt to
+                // that pair of braces, for a resize the clamp did not see.
+                let (width, height) = clamp_to_texture(size.width, size.height, gpu);
+                match session.render(&mut machine.emulator, width, height) {
+                    Some(frame) => frame,
+                    None => {
+                        // No font: the panels are made of text and there is
+                        // nothing to draw.  Reported once, when the mode is
+                        // entered, rather than every frame.
+                        return;
+                    }
+                }
+            }
+        };
+
         if (frame.width, frame.height) != self.frame_size {
             gpu.resize_texture(frame.width, frame.height);
             self.frame_size = (frame.width, frame.height);
@@ -265,6 +344,76 @@ impl App {
             gpu.resize_surface(size.width, size.height);
         }
     }
+
+    /// Switch to the debugger, or back to the calculator.
+    ///
+    /// The window is resized to suit the mode: the calculator is a fixed-size
+    /// picture of a fixed-size object, while the panels want room and a size the
+    /// user can change.  The debugger keeps its state across a switch, so
+    /// breakpoints and the scroll position survive a look at the calculator.
+    fn set_mode(&mut self, mode: Mode) {
+        let (Some(window), Some(gpu), Some(machine)) = (
+            self.window.clone(),
+            self.gpu.as_ref(),
+            self.machine.as_mut(),
+        ) else {
+            return;
+        };
+        if mode == self.mode {
+            return;
+        }
+
+        match mode {
+            Mode::Debugger => {
+                // Built once, then kept: breakpoints and scroll positions are
+                // the user's work and must survive a look at the calculator.
+                if self.debug.is_none() {
+                    let Some(font) = self.font.take() else {
+                        eprintln!(
+                            "the debugger needs a monospace font; \
+                             pass --font PATH or put one at {DEFAULT_FONT}"
+                        );
+                        return;
+                    };
+                    self.debug = Some(DebugSession::new(DebuggerUi::with_font(font)));
+                }
+                window.set_resizable(true);
+                let (w, h) = clamp_to_texture(DEBUG_WIDTH, DEBUG_HEIGHT, gpu);
+                let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                window.set_title("fx-991CN X -- debugger");
+            }
+            Mode::Calculator => {
+                window.set_resizable(false);
+                let (w, h) = machine.window_size();
+                let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                window.set_title(&format!("fx-991CN X  --  {:.2}x", machine.scale()));
+                // The calculator is paced by the throttle, which kept running
+                // while the debugger held the machine; restarting it makes the
+                // next batch start from now rather than from a debt.
+                machine.throttle.start(Instant::now());
+            }
+        }
+        self.mode = mode;
+        window.request_redraw();
+    }
+}
+
+/// The size the debugger opens at.
+const DEBUG_WIDTH: u32 = 1280;
+const DEBUG_HEIGHT: u32 = 800;
+
+/// Clamp a requested size to what the GPU can hold and the layout can use.
+///
+/// The frame is composed at the window's size and uploaded as one texture, so a
+/// window larger than `max_texture_dimension_2d` would fail validation inside
+/// `create_texture` -- a crash rather than a graceful failure.  The minimum comes
+/// from the layout, which would otherwise collapse its panels.
+fn clamp_to_texture(width: u32, height: u32, gpu: &Gpu) -> (u32, u32) {
+    let max = gpu.max_texture_dimension;
+    (
+        width.clamp(fx991_dbgui::MIN_WIDTH, max),
+        height.clamp(fx991_dbgui::MIN_HEIGHT, max),
+    )
 }
 
 impl ApplicationHandler for App {
@@ -373,6 +522,34 @@ impl ApplicationHandler for App {
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 use winit::keyboard::{Key, NamedKey};
+                // `F12` is the mode switch and works from either side, so the
+                // debugger is reachable before anything else in it is.
+                if matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
+                    let next = match self.mode {
+                        Mode::Calculator => Mode::Debugger,
+                        Mode::Debugger => Mode::Calculator,
+                    };
+                    self.set_mode(next);
+                    return;
+                }
+
+                if self.mode == Mode::Debugger {
+                    if let Some(key) = debug_key(&event.logical_key) {
+                        let Some(session) = self.debug.as_mut() else {
+                            return;
+                        };
+                        if key == DebugKey::Leave {
+                            self.set_mode(Mode::Calculator);
+                            return;
+                        }
+                        session.key(&mut machine.emulator, key);
+                        window
+                            .set_title(&format!("fx-991CN X -- debugger -- {}", session.status()));
+                        window.request_redraw();
+                    }
+                    return;
+                }
+
                 let delta = match &event.logical_key {
                     Key::Named(NamedKey::Escape) => {
                         event_loop.exit();
@@ -396,6 +573,28 @@ impl ApplicationHandler for App {
                     WinitButton::Right => MouseButton::Right,
                     _ => return,
                 };
+
+                // The debugger's panels take a click as "act on this row"; the
+                // calculator takes one as "press this key".
+                if self.mode == Mode::Debugger {
+                    if button != MouseButton::Left || state != ElementState::Pressed {
+                        return;
+                    }
+                    let size = window.inner_size();
+                    let (x, y) = self.cursor;
+                    if let Some(session) = self.debug.as_mut() {
+                        session.click(
+                            &mut machine.emulator,
+                            size.width,
+                            size.height,
+                            x as u32,
+                            y as u32,
+                        );
+                    }
+                    window.request_redraw();
+                    return;
+                }
+
                 let (x, y) = self.cursor;
                 let action = match state {
                     ElementState::Pressed => {
@@ -419,6 +618,31 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // A wheel scrolls the debugger's focused panel.  The calculator has
+            // no scrollable content, so the event is ignored there.
+            WindowEvent::MouseWheel { delta, .. } if self.mode == Mode::Debugger => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => lines as isize,
+                    // A pixel delta is reported by trackpads; three lines is a
+                    // reasonable step and keeps a flick from flying.
+                    MouseScrollDelta::PixelDelta(position) => {
+                        if position.y > 0.0 {
+                            3
+                        } else if position.y < 0.0 {
+                            -3
+                        } else {
+                            0
+                        }
+                    }
+                };
+                if lines != 0 {
+                    if let Some(session) = self.debug.as_mut() {
+                        session.key(&mut machine.emulator, DebugKey::Scroll(lines));
+                    }
+                    window.request_redraw();
+                }
+            }
+
             WindowEvent::RedrawRequested => self.redraw(event_loop),
 
             _ => {}
@@ -429,6 +653,31 @@ impl ApplicationHandler for App {
         let (Some(window), Some(machine)) = (self.window.clone(), self.machine.as_mut()) else {
             return;
         };
+
+        // The debugger drives the machine itself, in slices, and redraws when
+        // something changed.  The calculator's throttle is left alone: entering
+        // the debugger does not disturb it, and leaving restarts it.
+        if self.mode == Mode::Debugger {
+            let Some(session) = self.debug.as_mut() else {
+                return;
+            };
+            if session.state() == debug::RunState::Running {
+                if session.run_slice(&mut machine.emulator) {
+                    // Still going: come back for the next slice immediately.
+                    window.request_redraw();
+                } else {
+                    // The run ended.  A breakpoint or a watch is worth a line on
+                    // stdout as well as in the title: a long run that stops
+                    // somewhere unexpected is exactly when a log helps.
+                    if let Some(reason) = session.stop() {
+                        println!("stopped: {}", fx991_dbgui::stop_text(reason));
+                    }
+                    window.set_title(&format!("fx-991CN X -- debugger -- {}", session.status()));
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
 
         // Pace the emulator to the real hardware's rate, then run one batch.
         if let Some(delay) = machine.throttle.next_delay(Instant::now()) {
@@ -447,6 +696,32 @@ impl ApplicationHandler for App {
                 log_input_state(&mut machine.emulator);
             }
         }
+    }
+}
+
+/// Map a key to a debugger command, or `None` for a key the debugger ignores.
+///
+/// The bindings are the ones a native debugger uses, so the muscle memory
+/// carries: `F7`/`F8` step, `F9` runs, `F2` toggles a breakpoint.  `Esc` leaves
+/// the debugger rather than quitting the program -- it is the way back to the
+/// calculator, and `F12` does the same from either side.
+fn debug_key(key: &winit::keyboard::Key) -> Option<DebugKey> {
+    use winit::keyboard::{Key as WKey, NamedKey};
+    match key {
+        WKey::Named(NamedKey::F2) => Some(DebugKey::ToggleBreakpoint),
+        WKey::Named(NamedKey::F5) | WKey::Named(NamedKey::F9) => Some(DebugKey::Run),
+        WKey::Named(NamedKey::F7) => Some(DebugKey::Step),
+        WKey::Named(NamedKey::F8) => Some(DebugKey::StepOver),
+        WKey::Named(NamedKey::F6) => Some(DebugKey::StepOut),
+        WKey::Named(NamedKey::F3) => Some(DebugKey::FollowPc),
+        WKey::Named(NamedKey::F4) => Some(DebugKey::NextPanel),
+        WKey::Named(NamedKey::Escape) => Some(DebugKey::Leave),
+        WKey::Named(NamedKey::Space) => Some(DebugKey::Pause),
+        WKey::Named(NamedKey::ArrowUp) => Some(DebugKey::Scroll(-1)),
+        WKey::Named(NamedKey::ArrowDown) => Some(DebugKey::Scroll(1)),
+        WKey::Named(NamedKey::PageUp) => Some(DebugKey::Scroll(-10)),
+        WKey::Named(NamedKey::PageDown) => Some(DebugKey::Scroll(10)),
+        _ => None,
     }
 }
 

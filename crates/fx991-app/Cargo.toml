@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 fx991 = { workspace = true }
 fx991-ui = { workspace = true }
+fx991-dbg = { workspace = true }
+fx991-dbgui = { workspace = true }
 fx991-model = { workspace = true }
 fx991-bus = { workspace = true }
 wgpu = "30"
