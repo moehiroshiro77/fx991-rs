@@ -97,7 +97,8 @@ commands:
 options:
   --rom PATH                    ROM image      (default data/rom_verF.bin)
   --skin PATH                   face texture   (default data/skin.rgba)
-  --listing PATH                text listing   (default data/_disas_verF.txt)
+  --listing [PATH]              text listing path; bare for `disas`
+  --from-listing                `disas` reads the text listing instead of the ROM
   --run N                       ticks to run first (screen, render, dump)
   --keys KEYS                   keys to press first (render)
   --enter                       press EXE after --keys (render)
@@ -105,7 +106,6 @@ options:
   --screen PATH                 also render the display (calc)
   --script FILE                 commands for `dbg` (default: stdin)
   --boot N                      ticks to run before `dbg` accepts commands
-  --listing                     `disas` reads the text listing instead of the ROM
 ";
 
 // ------------------------------------------------------------------ arg helpers
@@ -150,7 +150,10 @@ impl<'a> Args<'a> {
                     continue;
                 }
                 if name == "listing" {
-                    listing = value.ok_or("--listing needs a path")?.to_string();
+                    match value {
+                        Some(path) => listing = path.to_string(),
+                        None => flags.push(("from-listing", None)),
+                    }
                     continue;
                 }
                 flags.push((name, value));
@@ -489,5 +492,34 @@ fn report_faults(emu: &Emu) {
         for fault in faults.iter().take(5) {
             println!("  {} at {:#07x}", fault.kind.label(), fault.address);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+
+    fn raw(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn bare_listing_selects_listing_mode_without_consuming_the_address() {
+        let raw_args = raw(&["0x10", "--listing"]);
+        let args = Args::parse(&raw_args).expect("arguments parse");
+
+        assert_eq!(args.positional, vec!["0x10"]);
+        assert!(args.flag("from-listing"));
+        assert_eq!(args.listing_path(), "data/_disas_verF.txt");
+    }
+
+    #[test]
+    fn listing_can_still_override_the_listing_path() {
+        let raw_args = raw(&["0x10", "--listing", "custom.txt"]);
+        let args = Args::parse(&raw_args).expect("arguments parse");
+
+        assert_eq!(args.positional, vec!["0x10"]);
+        assert!(!args.flag("from-listing"));
+        assert_eq!(args.listing_path(), "custom.txt");
     }
 }
