@@ -85,8 +85,22 @@ impl Throttle {
     }
 
     /// Start the wall clock, so [`Throttle::next_delay`] can pace the loop.
+    ///
+    /// This is "the loop is starting now", not merely "remember this instant":
+    /// [`Throttle::next_delay`] compares the intervals handed out against the
+    /// time elapsed since `started`, so the interval count has to be restarted
+    /// with the clock or the two measure different spans.  Calling it on a
+    /// throttle that has been running would otherwise ask the caller to wait out
+    /// every interval it had ever served -- five minutes of running would become
+    /// a five-minute sleep.
+    ///
+    /// The virtual clock ([`Throttle::take_batch`]'s `ticks_now`) is deliberately
+    /// left alone: it is the emulated timeline, which continues across a pause
+    /// rather than restarting, and the cycle count it derives stays continuous
+    /// because `cycles_emulated` is assigned rather than accumulated.
     pub fn start(&mut self, now: Instant) {
         self.started = Some(now);
+        self.intervals_served = 0;
     }
 
     /// Reset the virtual clock, keeping the configured rate.
@@ -202,6 +216,64 @@ mod tests {
             total += throttle.take_batch();
         }
         assert_eq!(total, CYCLES_PER_SECOND * 20);
+    }
+
+    #[test]
+    fn restarting_the_clock_does_not_ask_the_caller_to_wait_out_its_history() {
+        // The bug this pins: `start` used to reset only the clock, so the
+        // interval count kept growing while the elapsed time restarted at zero.
+        // A loop that had been running for a while and then restarted the clock
+        // -- a front end pausing and resuming, say -- was told to wait out every
+        // interval it had ever served, which is a freeze measured in minutes.
+        let mut throttle = Throttle::default();
+        let start = Instant::now();
+        throttle.start(start);
+        for _ in 0..3000 {
+            throttle.take_batch();
+        }
+        // 3000 intervals of 20 ms is a minute of "already served".
+        assert_eq!(
+            throttle.next_delay(start + Duration::from_millis(100)),
+            Some(Duration::from_millis(3000 * TIMER_INTERVAL_MS - 100)),
+            "the accumulated intervals are what the wait is measured against"
+        );
+
+        // Restart the clock, as a front end resuming after a pause does.
+        let resumed = start + Duration::from_secs(60);
+        throttle.start(resumed);
+        assert_eq!(
+            throttle.next_delay(resumed),
+            Some(Duration::ZERO),
+            "a fresh clock owes nothing"
+        );
+        // And the loop is paced normally again.
+        throttle.take_batch();
+        assert_eq!(
+            throttle.next_delay(resumed),
+            Some(Duration::from_millis(TIMER_INTERVAL_MS)),
+            "one interval of work is one interval of wait"
+        );
+    }
+
+    #[test]
+    fn restarting_the_clock_keeps_the_emulated_timeline_continuous() {
+        // The virtual clock is the emulated timeline, not the wall clock, so a
+        // restart must not rewind it: the cycles handed out continue from where
+        // they were rather than replaying the run.
+        let mut throttle = Throttle::default();
+        let start = Instant::now();
+        throttle.start(start);
+        let first = throttle.take_batch();
+        let after_one = throttle.cycles_emulated();
+
+        throttle.start(start + Duration::from_secs(10));
+        let second = throttle.take_batch();
+        assert_eq!(second, first, "the batch size is unaffected");
+        assert_eq!(
+            throttle.cycles_emulated(),
+            after_one + first,
+            "the timeline continued rather than restarting"
+        );
     }
 
     #[test]

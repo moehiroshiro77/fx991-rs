@@ -782,14 +782,23 @@ impl Debugger {
 
 /// Walk `before` instruction boundaries backwards from the PC.
 ///
-/// Walking backwards has to test both possible lengths: the previous instruction
-/// is 2 or 4 bytes, so the one that ends exactly at `start` is the right answer
-/// and simply stepping back by 4 would land mid-instruction.
+/// Walking a variable-length instruction set backwards is ambiguous: more than
+/// one start address can end exactly at `start`, and both readings are
+/// self-consistent.  A 4-byte instruction at `start - 4` and a 2-byte one at
+/// `start - 2` both explain the same boundary, so "does this candidate end here"
+/// cannot choose between them.
+///
+/// The longer candidate is tried first, which resolves it the way a forward scan
+/// does: from a known boundary a 4-byte instruction is consumed whole before the
+/// next one starts, so the earlier address is the one that scan would have
+/// produced.  Preferring the shorter one walks back into the middle of a long
+/// instruction and shows a listing the forward scan never produces.
 fn aligned_start(emu: &mut Emu, before: usize) -> u32 {
     let mut start = emu.pc();
     for _ in 0..before {
         let mut found = None;
-        for back in [2u32, 4] {
+        // Longest first, so the earlier boundary wins.
+        for back in [4u32, 2] {
             let candidate = start.saturating_sub(back) & !1;
             if candidate == start {
                 continue;
