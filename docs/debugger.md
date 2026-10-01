@@ -218,10 +218,17 @@ and watched while the calculator runs.  It lives in the graphical front end:
 cargo run --release -p fx991-app      # then press F12
 ```
 
-`F12` switches between the calculator and the debugger; `Esc` comes back, so it
-does not quit while the debugger is up.  The panels are arranged the way a native
-debugger arranges them -- disassembly across the top, memory under it, the
-register file and the stack down the right, and the breakpoints along the bottom:
+`F12` opens a **second window** with the panels, leaving the calculator where it
+is.  That is deliberate: the ROM is debugged through its display, so a breakpoint
+on a menu handler is not much use if the menu cannot be seen, and the menu cannot
+be driven if the keys cannot be clicked.  `F12` again, `Esc`, or the window's own
+close button puts the debugger away -- none of them quits the program, because the
+calculator is the program.  Breakpoints and scroll positions survive closing and
+reopening.
+
+The panels are arranged the way a native debugger arranges them -- disassembly
+across the top, memory under it, the register file and the stack down the right,
+and the breakpoints along the bottom:
 
 ```
 +--------------------------------------------------------------+
@@ -247,20 +254,34 @@ register file and the stack down the right, and the breakpoints along the bottom
 | `F5` / `F9` | run |
 | `Space` | pause |
 | `F2` | toggle a breakpoint at the PC |
-| `F3` | point the memory panel at the PC |
+| `F3` | follow the machine: re-anchor the listing and the dump to the PC |
 | `F4` | move the keyboard to the next panel |
 | arrows, `PgUp`/`PgDn`, wheel | scroll the focused panel |
-| `Esc` / `F12` | back to the calculator |
+| `Esc` / `F12` | close the debugger window |
 
 Clicking a disassembly row toggles a breakpoint at the address that row shows.
 The address is recomputed from the same window the panel drew, so a click cannot
 land on an address that has since scrolled away.
+
+The listing follows the PC until you scroll it.  Scrolling moves the window's
+anchor one **instruction** at a time rather than by a fixed number of bytes,
+because instructions are 2 or 4 bytes wide and an address has to land on a
+boundary; the walk tests both lengths and prefers the longer one, since a forward
+scan from a known boundary consumes a 4-byte instruction whole.  Scrolling also
+stops the listing following the machine, so the view stays where you put it while
+the program runs; `F3` anchors it to the PC again.
 
 A run is a blocking loop with no way to interrupt it, so the window runs it in
 slices and regains control between them.  A slice that spends its budget, or that
 finds the ROM parked, is not a stop: a parked machine is the ROM's normal state
 and a timer will wake it, so the run continues -- in larger slices while parked,
 where nothing executes and a smaller slice would buy only more wakeups.
+
+While the debugger is open it owns the machine: it holds it stopped, or advances
+it a slice at a time, and the calculator window's own pacing stands down.  Two
+things driving one machine would otherwise race.  The calculator window still
+repaints and still takes clicks -- a key press is input to the guest, not to the
+emulator, so it is as meaningful stopped as running.
 
 **The font is required and is not bundled.**  Put a monospace face at
 `data/font.ttf`, or pass `--font PATH`.  Monospace is not a preference: every
