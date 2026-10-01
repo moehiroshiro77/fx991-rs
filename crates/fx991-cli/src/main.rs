@@ -134,13 +134,16 @@ impl<'a> Args<'a> {
             if let Some(name) = token.strip_prefix("--") {
                 // A flag takes the next token as its value unless that token is
                 // itself a flag or there is none left, so `--variables` works bare.
-                let value = raw
-                    .get(index)
-                    .filter(|next| !next.starts_with("--"))
-                    .map(|next| {
-                        index += 1;
-                        next.as_str()
-                    });
+                let value = if is_boolean_flag(name) {
+                    None
+                } else {
+                    raw.get(index)
+                        .filter(|next| !next.starts_with("--"))
+                        .map(|next| {
+                            index += 1;
+                            next.as_str()
+                        })
+                };
                 if name == "rom" {
                     rom = value.ok_or("--rom needs a path")?.to_string();
                     continue;
@@ -197,6 +200,10 @@ impl<'a> Args<'a> {
                 .ok_or_else(|| format!("--{name} wants a number, got {text:?}")),
         }
     }
+}
+
+fn is_boolean_flag(name: &str) -> bool {
+    matches!(name, "enter" | "variables" | "display" | "from-listing")
 }
 
 /// Accept `123` and `0x7B`, so addresses can be written the way the plans do.
@@ -521,5 +528,15 @@ mod tests {
         assert_eq!(args.positional, vec!["0x10"]);
         assert!(!args.flag("from-listing"));
         assert_eq!(args.listing_path(), "custom.txt");
+    }
+
+    #[test]
+    fn boolean_flags_do_not_consume_following_positional_arguments() {
+        let raw_args = raw(&["--variables", "1+2", "--display"]);
+        let args = Args::parse(&raw_args).expect("arguments parse");
+
+        assert_eq!(args.positional, vec!["1+2"]);
+        assert!(args.flag("variables"));
+        assert!(args.flag("display"));
     }
 }
