@@ -16,11 +16,24 @@
 //!
 //! Two details matter:
 //!
-//! * the texture is `Rgba8Unorm`, **not** `Rgba8UnormSrgb`.  Compositing already
-//!   happened in sRGB bytes on the CPU, and an sRGB texture would linearise them
-//!   a second time and come out too dark;
+//! * the frame texture is `Rgba8Unorm`, **not** `Rgba8UnormSrgb`, because the CPU
+//!   already composited in sRGB bytes and an sRGB *texture* would linearise them
+//!   on read;
 //! * the sampler is `Nearest`, because the display is a dot matrix and
 //!   interpolating it makes the edges mush.
+//!
+//! # Why the surface stays sRGB
+//!
+//! A linear texture and an sRGB surface look like a mismatch and are not: they are
+//! two halves of one round trip.  The GPU reads the composited sRGB bytes as if
+//! they were linear, and the sRGB target then encodes them on write -- the encode
+//! undoes the read's misinterpretation, so the display receives exactly what the
+//! CPU composed.
+//!
+//! Making the surface non-sRGB "for consistency" breaks the pair.  The composited
+//! byte for the calculator's grey body is 77; against a non-sRGB target it reaches
+//! the screen as 77, where the source image implies 149, and the whole window goes
+//! dark.  A test at the bottom of this file holds the pair together.
 
 use std::sync::Arc;
 
@@ -62,6 +75,14 @@ impl std::fmt::Display for DrawError {
 
 impl std::error::Error for DrawError {}
 
+/// The format the composed frame is uploaded as.
+///
+/// **Not** the sRGB variant, and that is load-bearing: the CPU composited in sRGB
+/// bytes, and an sRGB texture would linearise them on read.  The sRGB surface
+/// target then encodes them again, so the pair is the identity and the display
+/// receives what was composed.  See the test at the bottom of this file.
+const FRAME_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
 /// The backends to try, in order, until one yields an adapter.
 ///
 /// Vulkan comes first because opening it is by far the cheapest: its instance
@@ -89,9 +110,19 @@ const BACKEND_PREFERENCE: [wgpu::Backends; 3] = [
 /// A backend that cannot offer a surface is treated the same as one that cannot
 /// offer an adapter -- the loop moves on -- because both are exactly what the
 /// fallback exists for.  Only the last backend's failure is reported.
+/// Open an instance, a surface and an adapter, trying each backend in preference
+/// order.
+///
+/// The surface is created from the instance that produced the adapter, so the
+/// two cannot be paired up by the caller after the fact.  The instance is handed
+/// back because it is what every later window needs to make its own surface.
+///
+/// A backend that cannot offer a surface is treated the same as one that cannot
+/// offer an adapter -- the loop moves on -- because both are exactly what the
+/// fallback exists for.  Only the last backend's failure is reported.
 fn open_surface_and_adapter(
     window: &Arc<Window>,
-) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), Box<dyn std::error::Error>> {
+) -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter), Box<dyn std::error::Error>> {
     let mut last_error = None;
     for backends in BACKEND_PREFERENCE {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -110,7 +141,7 @@ fn open_surface_and_adapter(
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         })) {
-            Ok(adapter) => return Ok((surface, adapter)),
+            Ok(adapter) => return Ok((instance, surface, adapter)),
             Err(err) => last_error = Some(err.to_string()),
         }
     }
@@ -119,33 +150,46 @@ fn open_surface_and_adapter(
         .into())
 }
 
-/// The GPU side: a surface, a pipeline, and one texture we overwrite per frame.
-pub struct Gpu {
-    surface: wgpu::Surface<'static>,
+/// The GPU resources both windows share.
+///
+/// Opening a device is the expensive part -- adapter selection, the instance, the
+/// pipeline layout and the shader -- and none of it depends on which window is
+/// being drawn to.  The calculator and the debugger are two windows onto one
+/// machine, so they share all of it and differ only in their surface, their
+/// swapchain configuration and the texture holding the frame they are showing.
+///
+/// Every `wgpu` handle here is reference-counted internally, so the per-window
+/// side holds clones rather than borrowing this; the device stays alive as long
+/// as any window does.
+pub struct GpuDevice {
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
-    texture: wgpu::Texture,
     sampler: wgpu::Sampler,
-    /// Set when wgpu reported the surface as suboptimal, so the next resize
-    /// reconfigures it even if the size did not change.
-    needs_reconfigure: bool,
+    bind_group_layout: wgpu::BindGroupLayout,
     /// The largest texture the device allows, per side.
     ///
-    /// The zoom is capped by this: a window taller than the limit makes
-    /// `Surface:configure` panic with a validation error, which is a crash, not
-    /// a graceful failure.  It is 2048 only if the device was asked for
-    /// `downlevel_defaults`, which this app deliberately does not do.
+    /// The zoom and the debugger's window size are capped by this: a window
+    /// taller than the limit makes `Surface:configure` panic with a validation
+    /// error, which is a crash, not a graceful failure.  It is 2048 only if the
+    /// device was asked for `downlevel_defaults`, which this app deliberately
+    /// does not do.
     pub max_texture_dimension: u32,
 }
 
-impl Gpu {
-    pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        let size = window.inner_size();
-        let (surface, adapter) = open_surface_and_adapter(&window)?;
+impl GpuDevice {
+    /// Open a device, using `window` to pick a backend that can present.
+    ///
+    /// The window is needed because backend selection is a question about
+    /// presentation -- a Vulkan instance that cannot make a surface for this
+    /// window is no use however fast it is -- so the first window decides, and
+    /// every later window reuses the answer.
+    pub fn new(window: &Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+        let (instance, surface, adapter) = open_surface_and_adapter(window)?;
+        // The surface was only needed to prove the adapter can present to this
+        // window; the window's own view creates the one it keeps.
+        drop(surface);
+
         // Ask for the adapter's own limits, not `downlevel_defaults`.
         //
         // `downlevel_defaults` is a WebGL-compatible baseline that pins
@@ -160,8 +204,8 @@ impl Gpu {
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
                 // `Performance` (the default) lets the driver sub-allocate
-                // resources into large blocks.  This window holds one small
-                // texture, so that strategy buys nothing and commits a great
+                // resources into large blocks.  These windows hold one small
+                // texture each, so that strategy buys nothing and commits a great
                 // deal of memory; `MemoryUsage` keeps the blocks small.
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
@@ -177,22 +221,6 @@ impl Gpu {
             max_texture_dimension
         );
 
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .ok_or("the adapter cannot present to this surface")?;
-        // A queued (vsync) swapchain costs many times the driver memory of an
-        // immediate one, and a queue only helps a producer that runs ahead of
-        // the display.  This window redraws solely when the guest's screen
-        // changes, which is far slower than a refresh, so the queue would sit
-        // empty while still being paid for.
-        //
-        // `AutoNoVsync` resolves to `Immediate`, else `Mailbox`, else `Fifo`,
-        // so it is valid on every platform.
-        config.present_mode = wgpu::PresentMode::AutoNoVsync;
-        surface.configure(&device, &config);
-
-        let texture = create_frame_texture(&device, NATURAL_WIDTH, NATURAL_HEIGHT);
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nearest"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -221,58 +249,149 @@ impl Gpu {
                 },
             ],
         });
-        let bind_group = make_bind_group(&device, &bind_group_layout, &view, &sampler);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("blit"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blit"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("blit"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
 
         Ok(Self {
-            surface,
+            instance,
             device,
             queue,
-            config,
-            pipeline,
-            bind_group_layout,
-            bind_group,
-            texture,
             sampler,
-            needs_reconfigure: false,
+            bind_group_layout,
             max_texture_dimension,
         })
     }
 
+    /// Build the per-window half: a surface, its swapchain, and a pipeline that
+    /// targets that swapchain's format.
+    ///
+    /// The pipeline is per window rather than shared because its colour target
+    /// format comes from the surface, and two surfaces on one adapter can report
+    /// different preferences.  Building one is a shader compile, so this is done
+    /// once per window rather than per frame.
+    pub fn view(&self, window: &Arc<Window>) -> Result<Gpu, Box<dyn std::error::Error>> {
+        let size = window.inner_size();
+        let surface = self.instance.create_surface(window.clone())?;
+        let adapter = self.adapter()?;
+
+        let mut config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .ok_or("the adapter cannot present to this surface")?;
+        // The format is left at the surface's own preference, which is the sRGB
+        // variant.  That is not a detail to "fix": the frame texture is
+        // `Rgba8Unorm`, so the GPU reads the composited sRGB bytes as if they were
+        // linear, and an sRGB target encodes them back.  The two operations are
+        // inverses, so the bytes reach the display exactly as composed.
+        //
+        // Forcing a non-sRGB target breaks that pairing and darkens everything:
+        // the composited byte for the calculator's grey body is 77, and it would
+        // reach the screen as 77 where the source image implies 149.
+        //
+        // A queued (vsync) swapchain costs many times the driver memory of an
+        // immediate one, and a queue only helps a producer that runs ahead of
+        // the display.  These windows redraw solely when something changes,
+        // which is far slower than a refresh, so the queue would sit empty while
+        // still being paid for.
+        //
+        // `AutoNoVsync` resolves to `Immediate`, else `Mailbox`, else `Fifo`,
+        // so it is valid on every platform.
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        surface.configure(&self.device, &config);
+
+        let texture = create_frame_texture(&self.device, NATURAL_WIDTH, NATURAL_HEIGHT);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group =
+            make_bind_group(&self.device, &self.bind_group_layout, &view, &self.sampler);
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("blit"),
+                source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("blit"),
+                bind_group_layouts: &[Some(&self.bind_group_layout)],
+                immediate_size: 0,
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blit"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        Ok(Gpu {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            surface,
+            config,
+            pipeline,
+            bind_group_layout: self.bind_group_layout.clone(),
+            bind_group,
+            sampler: self.sampler.clone(),
+            texture,
+            needs_reconfigure: false,
+        })
+    }
+
+    /// The adapter the device was opened on.
+    ///
+    /// `wgpu` does not hand the adapter back from a device, so it is asked of the
+    /// instance again.  This is what `get_capabilities` and `get_default_config`
+    /// need, and it costs an enumeration rather than a device creation.
+    fn adapter(&self) -> Result<wgpu::Adapter, Box<dyn std::error::Error>> {
+        pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|err| err.to_string().into())
+    }
+}
+
+/// One window's GPU side: a surface, a pipeline, and a texture per frame.
+pub struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    /// Kept alongside the bind group so a resize can build a new one: `wgpu`
+    /// handles are reference-counted, so these are clones of the shared ones
+    /// rather than copies of the resources.
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    texture: wgpu::Texture,
+    /// Set when wgpu reported the surface as suboptimal, so the next resize
+    /// reconfigures it even if the size did not change.
+    needs_reconfigure: bool,
+}
+
+impl Gpu {
     /// Upload a composed frame and draw it.
     ///
     /// Returns `Ok(None)` when the frame was presented, and `Ok(Some(reason))`
@@ -394,8 +513,7 @@ fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        // NOT Srgb: the CPU already composited in sRGB bytes.
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: FRAME_FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
@@ -454,3 +572,41 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     return textureSample(frame_tex, frame_sampler, in.uv);
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frame texture and the surface are a matched pair, and this is the
+    /// property that must not be "fixed".
+    ///
+    /// The CPU composites in sRGB bytes.  An `Rgba8Unorm` texture hands those
+    /// bytes to the shader as if they were linear, and an sRGB surface target
+    /// encodes them on write -- so the display receives exactly what was
+    /// composed.  Changing either half to look "correct" on its own breaks the
+    /// pair and darkens the picture: the composited byte for the calculator's
+    /// grey body is 77, and it would reach the screen as 77 where the source
+    /// image implies 149.
+    #[test]
+    fn the_frame_texture_and_the_surface_are_a_matched_pair() {
+        // The texture stays linear, so the GPU does not linearise twice.
+        assert_eq!(FRAME_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(
+            !FRAME_FORMAT.is_srgb(),
+            "an sRGB texture would linearise the composited bytes on read"
+        );
+        // The surface stays sRGB, so the write encodes what the read left
+        // linear.  The config takes its format from the adapter rather than from
+        // a constant, so what is pinned here is which of the two variants pairs
+        // with a linear texture.
+        assert!(
+            wgpu::TextureFormat::Bgra8UnormSrgb.is_srgb(),
+            "the sRGB surface variant is the one that pairs with a linear texture"
+        );
+        assert_ne!(
+            FRAME_FORMAT,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            "the two halves must not both be sRGB, nor both linear"
+        );
+    }
+}

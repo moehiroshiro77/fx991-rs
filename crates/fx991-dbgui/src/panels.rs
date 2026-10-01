@@ -180,22 +180,22 @@ pub fn toolbar(emu: &mut Emu, stop: Option<&StopReason>, tracing: bool) -> Row {
     Row::spans(spans)
 }
 
-/// The disassembly, with the current instruction and any breakpoint marked.
+/// The disassembly, `rows` lines from `start`.
 ///
-/// `rows` is how many lines fit; the window is centred on the PC, so stepping
-/// does not scroll the view out from under the reader.
-pub fn disassembly(debugger: &mut Debugger, emu: &mut Emu, rows: usize, offset: isize) -> Content {
+/// `start` is the address of the first line, and it is the caller's business
+/// whether that is the PC or somewhere the user scrolled to -- see
+/// [`disassembly_start_at_pc`] for the follow-the-machine case.  The window is a
+/// plain listing from there, so scrolling can reach any address rather than only
+/// the neighbourhood of the PC.
+///
+/// The current instruction is marked wherever it falls, and simply is not marked
+/// when it is outside the window.
+pub fn disassembly(debugger: &mut Debugger, emu: &mut Emu, start: u32, rows: usize) -> Content {
     if rows == 0 {
         return Content::default();
     }
-    // Half the window above the PC, so the instruction being executed sits near
-    // the middle where the eye already is.
-    let before = (rows / 2) as isize + offset;
-    let before = before.max(0) as usize;
-    let after = rows.saturating_sub(before + 1);
-
     let pc = emu.pc();
-    let insns = debugger.disassemble_insns_at_pc(emu, before, after);
+    let insns = debugger.disassemble_insns(emu, start, rows);
 
     // Which addresses carry a breakpoint, so the gutter can mark them.
     let armed: Vec<u32> = debugger
@@ -234,6 +234,72 @@ pub fn disassembly(debugger: &mut Debugger, emu: &mut Emu, rows: usize, offset: 
         out.push(Row::spans(spans).with_marker(marker));
     }
     Content { rows: out, focus }
+}
+
+/// The address a `rows`-line window centred on the PC starts at.
+///
+/// Half the window is above the PC, so the instruction being executed sits near
+/// the middle where the eye already is.  Walking back has to test both possible
+/// instruction lengths, which is the engine's job -- this only decides how far.
+pub fn disassembly_start_at_pc(debugger: &mut Debugger, emu: &mut Emu, rows: usize) -> u32 {
+    if rows == 0 {
+        return emu.pc();
+    }
+    // `after = 0` asks for the window `[start, pc]`; its first entry is `start`.
+    debugger
+        .disassemble_insns_at_pc(emu, rows / 2, 0)
+        .first()
+        .map(|insn| insn.address)
+        .unwrap_or_else(|| emu.pc())
+}
+
+/// The address one listing line after `address`.
+///
+/// Walks by [`nxu8_asm::disasm::Insn::length`], so it agrees with what
+/// [`disassembly`] draws: a `DSR<-` prefix is its own line, and stepping by a
+/// whole *executed* step would skip it.
+pub fn next_row(debugger: &mut Debugger, emu: &mut Emu, address: u32) -> u32 {
+    let length = debugger
+        .disassemble_insns(emu, address, 1)
+        .first()
+        .map(|insn| insn.length)
+        .unwrap_or(2);
+    // The address space is 24 bits, so the listing wraps at the top rather than
+    // running off it.
+    address.wrapping_add(length as u32) & 0x00FF_FFFF
+}
+
+/// The address one listing line before `address`, or `None` at the start.
+///
+/// Walking a variable-length instruction set backwards is ambiguous: more than
+/// one start address can end exactly at `address`, and both readings are
+/// self-consistent.  A 4-byte instruction at `address - 4` and a 2-byte one at
+/// `address - 2` both explain the same boundary, so a check of the form "does
+/// this candidate end here" cannot choose between them.
+///
+/// The longer candidate is tried first, which resolves it the way a disassembly
+/// does: scanning forward from a known boundary, a 4-byte instruction is consumed
+/// whole before the next one starts, so the earlier address is the one the
+/// forward scan would have produced.  Preferring the shorter one would walk back
+/// into the middle of a long instruction and draw a listing the forward scan
+/// never shows.
+pub fn previous_row(debugger: &mut Debugger, emu: &mut Emu, address: u32) -> Option<u32> {
+    // Longest first, so the earlier boundary wins.
+    for back in [4u32, 2] {
+        let candidate = address.saturating_sub(back) & !1;
+        if candidate == address {
+            continue;
+        }
+        let length = debugger
+            .disassemble_insns(emu, candidate, 1)
+            .first()
+            .map(|insn| insn.length)
+            .unwrap_or(2);
+        if candidate + length as u32 == address {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// A hex and ASCII dump of the data space.
@@ -510,7 +576,9 @@ mod tests {
     fn the_disassembly_marks_the_current_instruction() {
         let mut emu = emu();
         let mut debugger = Debugger::new();
-        let content = disassembly(&mut debugger, &mut emu, 5, 0);
+        // Following the machine puts the PC's own window on screen.
+        let start = disassembly_start_at_pc(&mut debugger, &mut emu, 5);
+        let content = disassembly(&mut debugger, &mut emu, start, 5);
         assert_eq!(content.rows.len(), 5);
         let focus = content.focus.expect("the PC is in the window");
         assert_eq!(
@@ -526,12 +594,28 @@ mod tests {
     }
 
     #[test]
+    fn the_current_instruction_is_unmarked_when_it_is_scrolled_away() {
+        // A window somewhere else in the space still lists instructions, but
+        // nothing in it is the PC, so nothing is marked.
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
+        let content = disassembly(&mut debugger, &mut emu, 0x1_0100, 4);
+        assert_eq!(content.rows.len(), 4);
+        assert!(content.focus.is_none(), "the PC is not in this window");
+        assert!(
+            !content.rows.iter().any(|row| row.marker == Marker::Current),
+            "no row is marked current"
+        );
+    }
+
+    #[test]
     fn the_disassembly_marks_an_armed_breakpoint() {
         let mut emu = emu();
         let mut debugger = Debugger::new();
         debugger.add_breakpoint_at(0x1_0002);
 
-        let content = disassembly(&mut debugger, &mut emu, 6, 0);
+        let start = disassembly_start_at_pc(&mut debugger, &mut emu, 6);
+        let content = disassembly(&mut debugger, &mut emu, start, 6);
         let marked: Vec<&Row> = content
             .rows
             .iter()
@@ -552,7 +636,8 @@ mod tests {
         let id = debugger.add_breakpoint_at(0x1_0002);
         debugger.breakpoint_mut(id).unwrap().enabled = false;
 
-        let content = disassembly(&mut debugger, &mut emu, 6, 0);
+        let start = disassembly_start_at_pc(&mut debugger, &mut emu, 6);
+        let content = disassembly(&mut debugger, &mut emu, start, 6);
         assert!(
             !content
                 .rows
@@ -721,6 +806,74 @@ mod tests {
 
         let row = toolbar(&mut emu, None, true);
         assert!(row.text().contains("TRACE"), "{}", row.text());
+    }
+
+    #[test]
+    fn walking_back_chooses_the_earlier_boundary_when_both_fit() {
+        // The ambiguity that makes backwards scanning hard, on the real ROM's
+        // first instruction: `B 00h:0946Ah` is four bytes at 0, and the two-byte
+        // instruction at 2 also ends exactly at 4.  Both candidates satisfy "it
+        // ends where I am", so the choice has to come from somewhere else -- and
+        // it is that a forward scan from 0 consumes the four-byte instruction
+        // whole, making 0 the boundary and 2 the middle of it.
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
+        // Point the machine at the start of the ROM, where that instruction is.
+        emu.chipset.cpu.regs.csr = 0;
+        emu.chipset.cpu.regs.pc = 4;
+
+        // The row above address 4 has to be 0, not 2.
+        assert_eq!(
+            previous_row(&mut debugger, &mut emu, 4),
+            Some(0),
+            "the earlier boundary wins"
+        );
+
+        // And it is a boundary a forward scan agrees with: row 0 drawn for two
+        // lines starts at 0 and the second line starts at 4.
+        let drawn = disassembly(&mut debugger, &mut emu, 0, 2);
+        let second = drawn.rows[1]
+            .text()
+            .split('h')
+            .next()
+            .and_then(|hex| u32::from_str_radix(hex.trim(), 16).ok())
+            .expect("the row starts with an address");
+        assert_eq!(second, 4, "the four-byte instruction ends at 4");
+    }
+
+    #[test]
+    fn walking_rows_agrees_with_the_listing_that_is_drawn() {
+        // The property that matters: stepping down `n` rows and up `n` rows
+        // returns to the start, and every row is on an instruction boundary.
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
+        let start = disassembly_start_at_pc(&mut debugger, &mut emu, 5);
+
+        let mut address = start;
+        let mut forward = vec![address];
+        for _ in 0..6 {
+            address = next_row(&mut debugger, &mut emu, address);
+            forward.push(address);
+        }
+        for pair in forward.windows(2) {
+            // Each step lands exactly where the drawn listing says the next line
+            // starts, so the two cannot disagree.
+            let drawn = disassembly(&mut debugger, &mut emu, pair[0], 2);
+            let second = drawn.rows[1]
+                .text()
+                .split('h')
+                .next()
+                .and_then(|hex| u32::from_str_radix(hex.trim(), 16).ok())
+                .expect("the row starts with an address");
+            assert_eq!(pair[1], second, "next_row disagrees with the listing");
+        }
+
+        // And back up the same number of rows returns to the start.
+        let mut back = address;
+        for _ in 0..6 {
+            back = previous_row(&mut debugger, &mut emu, back).expect("a previous row");
+        }
+        assert_eq!(back, start, "walking up undoes walking down");
     }
 
     #[test]

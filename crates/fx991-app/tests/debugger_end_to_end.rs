@@ -127,16 +127,17 @@ fn a_click_arms_the_address_the_clicked_row_shows() {
 
     // Every row of the disassembly maps to the address drawn on it, which is the
     // property that makes a click meaningful.  Clicking each row in turn and
-    // checking the address against the listing is what pins it.
+    // checking the armed address against the listing is what pins it.
     let layout = harness.ui.layout(MIN_WIDTH, MIN_HEIGHT);
     let rect = layout.disassembly;
     let content = rect.content(harness.ui.metrics());
     let metrics = *harness.ui.metrics();
     let rows = rect.rows(&metrics);
+    let start = harness
+        .ui
+        .disassembly_start(&mut harness.emu, &mut debugger, rows);
 
-    // The window is centred on the PC, so row `rows / 2` is the PC itself and the
-    // rows below it step forward through the listing.
-    for row in (rows / 2)..rows {
+    for row in 0..rows {
         let y = content.y + row as u32 * metrics.cell_h + 2;
         harness.ui.click(
             &mut harness.emu,
@@ -149,9 +150,9 @@ fn a_click_arms_the_address_the_clicked_row_shows() {
         let armed: Vec<u32> = debugger.breakpoints().map(|(_, bp)| bp.address).collect();
         assert_eq!(armed.len(), 1, "row {row} armed one breakpoint: {armed:?}");
 
-        // The disassembly the panel drew for that row, and the address the click
-        // produced, must agree.
-        let drawn = fx991_dbgui::panels::disassembly(&mut debugger, &mut harness.emu, rows, 0);
+        // The address the panel drew on that row, from the same listing the
+        // drawing used.
+        let drawn = fx991_dbgui::panels::disassembly(&mut debugger, &mut harness.emu, start, rows);
         let expected = drawn.rows[row]
             .text()
             .split('h')
@@ -179,4 +180,89 @@ fn a_click_arms_the_address_the_clicked_row_shows() {
             "the second click cleared it"
         );
     }
+}
+
+#[test]
+fn scrolling_the_disassembly_moves_the_listing_and_leaves_the_pc_behind() {
+    let Some(mut harness) = harness() else {
+        return;
+    };
+    let mut debugger = Debugger::new();
+
+    // The window starts on the PC.
+    assert!(harness.ui.is_following(), "it starts following the machine");
+    let rows = harness
+        .ui
+        .layout(MIN_WIDTH, MIN_HEIGHT)
+        .disassembly
+        .rows(harness.ui.metrics());
+    let start = harness
+        .ui
+        .disassembly_start(&mut harness.emu, &mut debugger, rows);
+
+    // One row down moves the anchor to the next instruction, not further: an
+    // address has to land on an instruction boundary, so the step is the length
+    // of the instruction at the anchor rather than a fixed number of bytes.
+    harness.ui.scroll(
+        &mut harness.emu,
+        &mut debugger,
+        MIN_WIDTH,
+        MIN_HEIGHT,
+        fx991_dbgui::Panel::Disassembly,
+        1,
+    );
+    assert!(!harness.ui.is_following(), "scrolling leaves the PC");
+    let moved = harness
+        .ui
+        .disassembly_start(&mut harness.emu, &mut debugger, rows);
+    let expected = fx991_dbgui::panels::next_row(&mut debugger, &mut harness.emu, start);
+    assert_eq!(moved, expected, "one row down is one instruction");
+
+    // And back up returns to where it was.
+    harness.ui.scroll(
+        &mut harness.emu,
+        &mut debugger,
+        MIN_WIDTH,
+        MIN_HEIGHT,
+        fx991_dbgui::Panel::Disassembly,
+        -1,
+    );
+    let back = harness
+        .ui
+        .disassembly_start(&mut harness.emu, &mut debugger, rows);
+    assert_eq!(back, start, "one row up undoes one row down");
+}
+
+#[test]
+fn following_the_machine_re_anchors_the_disassembly() {
+    let Some(mut harness) = harness() else {
+        return;
+    };
+    let mut debugger = Debugger::new();
+    let rows = harness
+        .ui
+        .layout(MIN_WIDTH, MIN_HEIGHT)
+        .disassembly
+        .rows(harness.ui.metrics());
+
+    // Scroll far away, then ask to follow again.
+    harness.ui.scroll(
+        &mut harness.emu,
+        &mut debugger,
+        MIN_WIDTH,
+        MIN_HEIGHT,
+        fx991_dbgui::Panel::Disassembly,
+        5,
+    );
+    assert!(!harness.ui.is_following());
+    harness.ui.follow_pc();
+    assert!(harness.ui.is_following());
+
+    // The anchor is the PC's window again.
+    let after = harness
+        .ui
+        .disassembly_start(&mut harness.emu, &mut debugger, rows);
+    let expected =
+        fx991_dbgui::panels::disassembly_start_at_pc(&mut debugger, &mut harness.emu, rows);
+    assert_eq!(after, expected, "following puts the PC back in view");
 }

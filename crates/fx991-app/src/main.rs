@@ -9,30 +9,39 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General
 // Public License in LICENSE for more details.
 
-//! A wgpu window showing the calculator's face, with clickable keys.
+//! Two wgpu windows onto one calculator.
 //!
-//! ```text
-//! cargo run --release -p fx991-app
-//! ```
+//! The calculator is a fixed-size picture of a fixed-size object, with clickable
+//! keys: left-click presses one, right-click latches it down (so you can hold
+//! `SHIFT` and then click something else), and clicking `ON` power-cycles it.
+//! `+`/`-` zoom it and `Esc` quits.
 //!
-//! Left-click a key to press it, right-click to latch it down (so you can hold
-//! `SHIFT` and then click something else), and click `ON` to power-cycle.
-//! `+`/`-` zoom, `Esc` quits, and `F12` switches to the debugger.
+//! `F12` opens a second window with the debugger's panels.  It is a second window
+//! rather than a mode on the first because the ROM is debugged *through* its
+//! display: a breakpoint on a menu handler is not much use if the menu cannot be
+//! seen, and a menu cannot be driven if the keys cannot be clicked.  The two sit
+//! side by side and share one machine.
 //!
-//! The design follows  §M3.  The whole face is composed on the
-//! CPU by `fx991-ui` and uploaded as one texture per changed frame -- option (a)
-//! in that section -- so the GPU side is a single textured triangle.  Two
-//! details matter:
+//! # One device, two surfaces
 //!
-//! * the texture is `Rgba8Unorm`, **not** `Rgba8UnormSrgb`: compositing already
-//!   happened in sRGB bytes on the CPU, and an sRGB texture would linearise them
-//!   a second time and come out too dark (§5.6);
+//! Both windows are the same picture-making machine: the face is composed on the
+//! CPU by `fx991-ui` and the panels by `fx991-dbgui`, and each is uploaded as one
+//! texture and drawn as a single textured triangle.  So the expensive half -- the
+//! instance, the adapter, the device, the sampler and the bind-group layout --
+//! lives in [`gpu::GpuDevice`] and is opened once, and each window holds only what
+//! is its own: a surface, a swapchain, and a pipeline for that swapchain's format.
+//!
+//! Two details of the pipeline matter:
+//!
+//! * the frame texture is `Rgba8Unorm`, **not** `Rgba8UnormSrgb`: compositing
+//!   already happened in sRGB bytes on the CPU, and an sRGB texture would
+//!   linearise them on read;
 //! * the sampler is `Nearest`, because the display is a dot matrix and
 //!   interpolating it makes the edges mush.
 //!
-//! The debugger reuses that same path: `fx991-dbgui` composes its panels into an
-//! `fx991_ui::Frame` too, so the mode switch changes what is uploaded and nothing
-//! else.  See [`debug`].
+//! The surface keeps the sRGB format the adapter prefers, and that pairs with the
+//! linear texture rather than clashing with it -- [`gpu`] explains why, and why
+//! changing it darkens both windows.
 //!
 //! Everything testable without a GPU lives in [`input`], [`debug`], and in
 //! `fx991-ui`; this file is the glue.
@@ -56,7 +65,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowButtons, WindowId};
 
 use debug::{DebugSession, Key as DebugKey};
-use gpu::{Gpu, SurfaceProblem};
+use gpu::{Gpu, GpuDevice, SurfaceProblem};
 use input::{Action, Mouse, MouseButton};
 use window::block_maximise;
 use zoom::{
@@ -91,7 +100,8 @@ usage: fx991cnx [ZOOM] [--rom PATH] [--skin PATH] [--font PATH]
   --skin PATH face texture, RGBA  (default: data/skin.rgba)
   --font PATH debugger font, TTF  (default: data/font.ttf, monospace)
 
-Keys: left-click presses, right-click latches, +/- zoom, F12 debugger, Esc quits.";
+Keys: left-click presses, right-click latches, +/- zoom, F12 opens the debugger,
+Esc quits (or closes the debugger window when it is focused).";
 
 fn parse_args() -> Result<Options, String> {
     let mut options = Options {
@@ -150,15 +160,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(rom, skin, font, options.quarters);
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-/// Which face the window is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// The calculator, as the user sees it.
-    Calculator,
-    /// The debugger's panels.
-    Debugger,
 }
 
 /// The calculator plus its pacing and input state.
@@ -236,30 +237,55 @@ impl Machine {
     }
 }
 
+/// The calculator window: the face, its input, and the machine behind it.
+struct CalculatorWindow {
+    window: Arc<Window>,
+    gpu: Gpu,
+    machine: Machine,
+    /// Last cursor position, in this window's pixels.
+    cursor: (f64, f64),
+    /// The frame size this window's texture currently holds.
+    frame_size: (u32, u32),
+}
+
+/// The debugger window: the panels, their input, and the session.
+///
+/// A second window rather than a mode on the first, so the calculator stays
+/// visible and clickable while a breakpoint is being set.  Debugging this ROM
+/// means watching that display -- a menu, a dialog, a value -- and a debugger
+/// that hides it sends the user back to the other window to look, which is the
+/// thing the second window exists to avoid.
+struct DebugWindow {
+    window: Arc<Window>,
+    gpu: Gpu,
+    session: DebugSession,
+    /// Last cursor position, in this window's pixels.
+    cursor: (f64, f64),
+    /// The frame size this window's texture currently holds.
+    frame_size: (u32, u32),
+}
+
 /// The winit application.
 struct App {
     rom: Vec<u8>,
     skin: fx991_ui::Skin,
     /// The debugger's font, or `None` when the user has not supplied one.
+    ///
+    /// Held rather than consumed: the debugger window is opened on request, and
+    /// a second `F12` after closing it needs the font again.
     font: Option<FontSet>,
     /// `None` means "fit the screen"; `Some` is an explicit user choice.
     /// In quarter steps.
     quarters: Option<u32>,
-    window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
-    machine: Option<Machine>,
-    /// The debugger, once it has been entered.
+    /// The GPU resources both windows share, opened with the first one.
+    device: Option<GpuDevice>,
+    /// The calculator, once the event loop has resumed.
+    calculator: Option<CalculatorWindow>,
+    /// The debugger, once it has been opened.
     ///
-    /// Built lazily so the font is loaded and the panels are laid out only when
-    /// someone asks for them, and kept so breakpoints and scroll positions
-    /// survive leaving and re-entering.
-    debug: Option<DebugSession>,
-    /// Which face the window is showing.
-    mode: Mode,
-    /// Last cursor position, in *window* pixels.
-    cursor: (f64, f64),
-    /// The frame size the GPU texture currently holds.
-    frame_size: (u32, u32),
+    /// Kept across closing and reopening so breakpoints, scroll positions and
+    /// snapshots are not thrown away by a look at the calculator.
+    debug: Option<DebugWindow>,
 }
 
 impl App {
@@ -274,127 +300,163 @@ impl App {
             skin,
             font,
             quarters,
-            window: None,
-            gpu: None,
-            machine: None,
+            device: None,
+            calculator: None,
             debug: None,
-            mode: Mode::Calculator,
-            cursor: (0.0, 0.0),
-            frame_size: (NATURAL_WIDTH, NATURAL_HEIGHT),
         }
     }
 
-    /// Re-upload the frame and present it.
-    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(window), Some(gpu), Some(machine)) = (
-            self.window.clone(),
-            self.gpu.as_mut(),
-            self.machine.as_mut(),
-        ) else {
-            return;
-        };
-
-        let frame = match self.mode {
-            Mode::Calculator => machine.renderer.render(&mut machine.emulator.chipset),
-            Mode::Debugger => {
-                let Some(session) = self.debug.as_mut() else {
-                    return;
-                };
-                let size = window.inner_size();
-                // The frame is composed at the window's size, so a window larger
-                // than the device's texture limit would fail to upload.  The
-                // window is clamped when the mode is entered; this is the belt to
-                // that pair of braces, for a resize the clamp did not see.
-                let (width, height) = clamp_to_texture(size.width, size.height, gpu);
-                match session.render(&mut machine.emulator, width, height) {
-                    Some(frame) => frame,
-                    None => {
-                        // No font: the panels are made of text and there is
-                        // nothing to draw.  Reported once, when the mode is
-                        // entered, rather than every frame.
-                        return;
-                    }
-                }
-            }
-        };
-
-        if (frame.width, frame.height) != self.frame_size {
-            gpu.resize_texture(frame.width, frame.height);
-            self.frame_size = (frame.width, frame.height);
-        }
-        match gpu.draw(&frame) {
-            // Presented, or a surface state that only means "skip this frame".
-            Ok(None) => {}
-            Ok(Some(problem)) => match problem {
-                // A lost or outdated surface needs reconfiguring before the next
-                // frame; a minimised window or a slow present needs nothing.
-                SurfaceProblem::Lost | SurfaceProblem::Outdated => {
-                    let size = window.inner_size();
-                    gpu.resize_surface(size.width, size.height);
-                }
-                SurfaceProblem::Timeout | SurfaceProblem::Occluded => {}
-            },
-            Err(err) => {
-                eprintln!("draw failed: {err}");
-                event_loop.exit();
-            }
-        }
-        if gpu.take_reconfigure_request() {
-            let size = window.inner_size();
-            gpu.resize_surface(size.width, size.height);
-        }
-    }
-
-    /// Switch to the debugger, or back to the calculator.
+    /// Open the debugger window, or bring it to the front if it is already up.
     ///
-    /// The window is resized to suit the mode: the calculator is a fixed-size
-    /// picture of a fixed-size object, while the panels want room and a size the
-    /// user can change.  The debugger keeps its state across a switch, so
-    /// breakpoints and the scroll position survive a look at the calculator.
-    fn set_mode(&mut self, mode: Mode) {
-        let (Some(window), Some(gpu), Some(machine)) = (
-            self.window.clone(),
-            self.gpu.as_ref(),
-            self.machine.as_mut(),
-        ) else {
+    /// The calculator window is untouched: the two sit side by side, which is the
+    /// point -- a breakpoint on a menu handler is not much use if the menu cannot
+    /// be seen and clicked.
+    fn open_debugger(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(debug) = self.debug.as_ref() {
+            debug.window.focus_window();
+            return;
+        }
+        let Some(device) = self.device.as_ref() else {
             return;
         };
-        if mode == self.mode {
+        // The font is loaded once, at startup; without one the panels cannot be
+        // drawn, and saying so is better than a blank window.
+        let Some(font) = self.font.take() else {
+            eprintln!(
+                "the debugger needs a monospace font;                  pass --font PATH or put one at {DEFAULT_FONT}"
+            );
             return;
-        }
+        };
 
-        match mode {
-            Mode::Debugger => {
-                // Built once, then kept: breakpoints and scroll positions are
-                // the user's work and must survive a look at the calculator.
-                if self.debug.is_none() {
-                    let Some(font) = self.font.take() else {
-                        eprintln!(
-                            "the debugger needs a monospace font; \
-                             pass --font PATH or put one at {DEFAULT_FONT}"
-                        );
-                        return;
-                    };
-                    self.debug = Some(DebugSession::new(DebuggerUi::with_font(font)));
-                }
-                window.set_resizable(true);
-                let (w, h) = clamp_to_texture(DEBUG_WIDTH, DEBUG_HEIGHT, gpu);
-                let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
-                window.set_title("fx-991CN X -- debugger");
+        let attributes = Window::default_attributes()
+            .with_title("fx-991CN X -- debugger")
+            .with_inner_size(winit::dpi::PhysicalSize::new(DEBUG_WIDTH, DEBUG_HEIGHT));
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                eprintln!("could not open the debugger window: {err}");
+                self.font = Some(font);
+                return;
             }
-            Mode::Calculator => {
-                window.set_resizable(false);
-                let (w, h) = machine.window_size();
-                let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
-                window.set_title(&format!("fx-991CN X  --  {:.2}x", machine.scale()));
-                // The calculator is paced by the throttle, which kept running
-                // while the debugger held the machine; restarting it makes the
-                // next batch start from now rather than from a debt.
-                machine.throttle.start(Instant::now());
+        };
+        let gpu = match device.view(&window) {
+            Ok(gpu) => gpu,
+            Err(err) => {
+                eprintln!("could not open the debugger's GPU side: {err}");
+                self.font = Some(font);
+                return;
             }
+        };
+        // Clamp to what the device can hold: the frame is composed at the
+        // window's size and uploaded as one texture.
+        let (w, h) = clamp_to_texture(DEBUG_WIDTH, DEBUG_HEIGHT, device);
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+
+        println!("debugger opened -- F7/F8 step, F9 run, F2 breakpoint, Esc closes");
+        self.debug = Some(DebugWindow {
+            window,
+            gpu,
+            session: DebugSession::new(DebuggerUi::with_font(font)),
+            cursor: (0.0, 0.0),
+            frame_size: (fx991_dbgui::MIN_WIDTH, fx991_dbgui::MIN_HEIGHT),
+        });
+    }
+
+    /// Close the debugger window, keeping its session.
+    ///
+    /// The session outlives the window so breakpoints and scroll positions
+    /// survive a look away, which is why only the window and its GPU side go.
+    fn close_debugger(&mut self) {
+        if let Some(mut debug) = self.debug.take() {
+            // The font goes back so a reopened window can draw.
+            self.font = Some(debug.session.take_font());
+            println!("debugger closed");
         }
-        self.mode = mode;
-        window.request_redraw();
+    }
+
+    /// Compose and present the calculator window's frame.
+    fn redraw_calculator(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(calc) = self.calculator.as_mut() else {
+            return;
+        };
+        let frame = calc
+            .machine
+            .renderer
+            .render(&mut calc.machine.emulator.chipset);
+        present(
+            event_loop,
+            &calc.window,
+            &mut calc.gpu,
+            &mut calc.frame_size,
+            &frame,
+        );
+    }
+
+    /// Compose and present the debugger window's frame.
+    fn redraw_debugger(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
+        let Some(calc) = self.calculator.as_mut() else {
+            return;
+        };
+        let Some(debug) = self.debug.as_mut() else {
+            return;
+        };
+        let size = debug.window.inner_size();
+        let (width, height) = clamp_to_texture(size.width, size.height, device);
+        let Some(frame) = debug
+            .session
+            .render(&mut calc.machine.emulator, width, height)
+        else {
+            // No font, which `open_debugger` already reported.
+            return;
+        };
+        present(
+            event_loop,
+            &debug.window,
+            &mut debug.gpu,
+            &mut debug.frame_size,
+            &frame,
+        );
+    }
+}
+
+/// Upload a frame to a window and present it.
+///
+/// Shared by both windows: they differ in what they compose, not in how it gets
+/// to the screen.
+fn present(
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+    gpu: &mut Gpu,
+    frame_size: &mut (u32, u32),
+    frame: &fx991_ui::Frame,
+) {
+    if (frame.width, frame.height) != *frame_size {
+        gpu.resize_texture(frame.width, frame.height);
+        *frame_size = (frame.width, frame.height);
+    }
+    match gpu.draw(frame) {
+        // Presented, or a surface state that only means "skip this frame".
+        Ok(None) => {}
+        Ok(Some(problem)) => match problem {
+            // A lost or outdated surface needs reconfiguring before the next
+            // frame; a minimised window or a slow present needs nothing.
+            SurfaceProblem::Lost | SurfaceProblem::Outdated => {
+                let size = window.inner_size();
+                gpu.resize_surface(size.width, size.height);
+            }
+            SurfaceProblem::Timeout | SurfaceProblem::Occluded => {}
+        },
+        Err(err) => {
+            eprintln!("draw failed: {err}");
+            event_loop.exit();
+        }
+    }
+    if gpu.take_reconfigure_request() {
+        let size = window.inner_size();
+        gpu.resize_surface(size.width, size.height);
     }
 }
 
@@ -408,8 +470,8 @@ const DEBUG_HEIGHT: u32 = 800;
 /// window larger than `max_texture_dimension_2d` would fail validation inside
 /// `create_texture` -- a crash rather than a graceful failure.  The minimum comes
 /// from the layout, which would otherwise collapse its panels.
-fn clamp_to_texture(width: u32, height: u32, gpu: &Gpu) -> (u32, u32) {
-    let max = gpu.max_texture_dimension;
+fn clamp_to_texture(width: u32, height: u32, device: &GpuDevice) -> (u32, u32) {
+    let max = device.max_texture_dimension;
     (
         width.clamp(fx991_dbgui::MIN_WIDTH, max),
         height.clamp(fx991_dbgui::MIN_HEIGHT, max),
@@ -418,7 +480,7 @@ fn clamp_to_texture(width: u32, height: u32, gpu: &Gpu) -> (u32, u32) {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.calculator.is_some() {
             return;
         }
         // Pick a zoom that fits the screen unless the user asked for one.
@@ -454,10 +516,18 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attributes).expect("window"));
         block_maximise(&window);
 
-        let gpu = match Gpu::new(window.clone()) {
-            Ok(gpu) => gpu,
+        let device = match GpuDevice::new(&window) {
+            Ok(device) => device,
             Err(err) => {
                 eprintln!("could not start the GPU: {err}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let gpu = match device.view(&window) {
+            Ok(gpu) => gpu,
+            Err(err) => {
+                eprintln!("could not draw to the window: {err}");
                 event_loop.exit();
                 return;
             }
@@ -466,12 +536,12 @@ impl ApplicationHandler for App {
         // Now that the GPU's limit is known, settle the zoom.  A window taller
         // than `max_texture_dimension_2d` makes `Surface:configure` panic, so
         // the cap has to come from the adapter, not from the screen.
-        let max_quarters = max_quarters_for_texture_limit(gpu.max_texture_dimension);
+        let max_quarters = max_quarters_for_texture_limit(device.max_texture_dimension);
         let quarters = wanted.min(max_quarters);
         if quarters < wanted {
             println!(
                 "note: this GPU caps textures at {}px, so the zoom is limited to {:.2}x",
-                gpu.max_texture_dimension,
+                device.max_texture_dimension,
                 quarters as f64 / QUARTERS_PER_UNIT as f64
             );
         }
@@ -489,67 +559,118 @@ impl ApplicationHandler for App {
         machine.throttle.start(Instant::now());
         window.set_title(&format!("fx-991CN X  --  {:.2}x", machine.scale()));
         println!(
-            "ready at {:.2}x -- left-click presses, right-click latches, +/- zoom, Esc quits",
+            "ready at {:.2}x -- left-click presses, right-click latches, +/- zoom, \
+             F12 debugger, Esc quits",
             machine.scale()
         );
 
-        self.window = Some(window);
-        self.gpu = Some(gpu);
-        self.machine = Some(machine);
+        self.device = Some(device);
+        self.calculator = Some(CalculatorWindow {
+            window,
+            gpu,
+            machine,
+            cursor: (0.0, 0.0),
+            frame_size: (NATURAL_WIDTH, NATURAL_HEIGHT),
+        });
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let (Some(window), Some(machine)) = (self.window.clone(), self.machine.as_mut()) else {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Which window it is decides what a key or a click means, so the two
+        // handlers are separate rather than one that tests a mode.
+        let is_debugger = self
+            .debug
+            .as_ref()
+            .is_some_and(|debug| debug.window.id() == id);
+        if is_debugger {
+            self.debug_window_event(event_loop, event);
+        } else {
+            self.calculator_window_event(event_loop, event);
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let Some(calc) = self.calculator.as_mut() else {
             return;
         };
+
+        // The debugger holds the machine while it is stopped, and drives it in
+        // slices while it runs.  Either way the calculator's own pacing is left
+        // alone: the two would otherwise both advance the machine.
+        if let Some(debug) = self.debug.as_mut() {
+            if debug.session.state() == debug::RunState::Running {
+                if debug.session.run_slice(&mut calc.machine.emulator) {
+                    // Still going: come back for the next slice immediately.
+                    debug.window.request_redraw();
+                } else {
+                    // The run ended.  A breakpoint or a watch is worth a line on
+                    // stdout as well as in the title: a long run that stops
+                    // somewhere unexpected is exactly when a log helps.
+                    if let Some(reason) = debug.session.stop() {
+                        println!("stopped: {}", fx991_dbgui::stop_text(reason));
+                    }
+                    debug.window.set_title(&format!(
+                        "fx-991CN X -- debugger -- {}",
+                        debug.session.status()
+                    ));
+                    debug.window.request_redraw();
+                }
+            }
+            // The panels show the machine's state, which a run changes; repaint
+            // them so the listing and registers keep up.
+            debug.window.request_redraw();
+            return;
+        }
+
+        // No debugger: pace the emulator to the real hardware's rate, then run
+        // one batch.
+        if let Some(delay) = calc.machine.throttle.next_delay(Instant::now()) {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+        }
+        calc.machine.run_batch();
+
+        // Redraw only when the machine says something visible changed.  The
+        // frame request covers the screen buffer and the key highlights; a
+        // resize is handled by the surface itself.
+        if calc.machine.emulator.chipset.take_frame_request() {
+            calc.window.request_redraw();
+            if std::env::var_os("FX991_TRACE_INPUT").is_some() {
+                log_input_state(&mut calc.machine.emulator);
+            }
+        }
+    }
+}
+
+impl App {
+    /// Handle an event for the calculator window.
+    fn calculator_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let Some(calc) = self.calculator.as_mut() else {
+            return;
+        };
+        let window = calc.window.clone();
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize_surface(size.width, size.height);
-                }
+                calc.gpu.resize_surface(size.width, size.height);
                 // Keep the click mapping in step with the client area, so a
                 // window manager's title bar or a scaled display cannot make
                 // clicks land on the wrong key.
-                machine.mouse.set_client_size(size.width, size.height);
+                calc.machine.mouse.set_client_size(size.width, size.height);
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x, position.y);
+                calc.cursor = (position.x, position.y);
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 use winit::keyboard::{Key, NamedKey};
-                // `F12` is the mode switch and works from either side, so the
-                // debugger is reachable before anything else in it is.
                 if matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
-                    let next = match self.mode {
-                        Mode::Calculator => Mode::Debugger,
-                        Mode::Debugger => Mode::Calculator,
-                    };
-                    self.set_mode(next);
+                    self.open_debugger(event_loop);
                     return;
                 }
-
-                if self.mode == Mode::Debugger {
-                    if let Some(key) = debug_key(&event.logical_key) {
-                        let Some(session) = self.debug.as_mut() else {
-                            return;
-                        };
-                        if key == DebugKey::Leave {
-                            self.set_mode(Mode::Calculator);
-                            return;
-                        }
-                        session.key(&mut machine.emulator, key);
-                        window
-                            .set_title(&format!("fx-991CN X -- debugger -- {}", session.status()));
-                        window.request_redraw();
-                    }
-                    return;
-                }
-
                 let delta = match &event.logical_key {
                     Key::Named(NamedKey::Escape) => {
                         event_loop.exit();
@@ -560,10 +681,10 @@ impl ApplicationHandler for App {
                     Key::Character(text) if matches!(text.as_str(), "-" | "_") => -1,
                     _ => return,
                 };
-                machine.nudge_scale(delta);
-                self.quarters = Some(machine.quarters);
-                window.set_title(&format!("fx-991CN X  --  {:.2}x", machine.scale()));
-                let (w, h) = machine.window_size();
+                calc.machine.nudge_scale(delta);
+                self.quarters = Some(calc.machine.quarters);
+                window.set_title(&format!("fx-991CN X  --  {:.2}x", calc.machine.scale()));
+                let (w, h) = calc.machine.window_size();
                 let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
             }
 
@@ -573,38 +694,17 @@ impl ApplicationHandler for App {
                     WinitButton::Right => MouseButton::Right,
                     _ => return,
                 };
-
-                // The debugger's panels take a click as "act on this row"; the
-                // calculator takes one as "press this key".
-                if self.mode == Mode::Debugger {
-                    if button != MouseButton::Left || state != ElementState::Pressed {
-                        return;
-                    }
-                    let size = window.inner_size();
-                    let (x, y) = self.cursor;
-                    if let Some(session) = self.debug.as_mut() {
-                        session.click(
-                            &mut machine.emulator,
-                            size.width,
-                            size.height,
-                            x as u32,
-                            y as u32,
-                        );
-                    }
-                    window.request_redraw();
-                    return;
-                }
-
-                let (x, y) = self.cursor;
+                let (x, y) = calc.cursor;
                 let action = match state {
                     ElementState::Pressed => {
-                        machine
+                        calc.machine
                             .mouse
-                            .press(&mut machine.emulator.chipset, button, x, y)
+                            .press(&mut calc.machine.emulator.chipset, button, x, y)
                     }
-                    ElementState::Released if button == MouseButton::Left => {
-                        machine.mouse.release(&mut machine.emulator.chipset)
-                    }
+                    ElementState::Released if button == MouseButton::Left => calc
+                        .machine
+                        .mouse
+                        .release(&mut calc.machine.emulator.chipset),
                     // A right-button release does nothing: the latch is toggled
                     // on the press, and stays until the next right-click.
                     ElementState::Released => return,
@@ -618,9 +718,78 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // A wheel scrolls the debugger's focused panel.  The calculator has
-            // no scrollable content, so the event is ignored there.
-            WindowEvent::MouseWheel { delta, .. } if self.mode == Mode::Debugger => {
+            WindowEvent::RedrawRequested => self.redraw_calculator(event_loop),
+
+            _ => {}
+        }
+    }
+
+    /// Handle an event for the debugger window.
+    fn debug_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        // Closing the window closes the window, not the program: the calculator
+        // is the program, and the debugger is something you open over it.
+        if matches!(event, WindowEvent::CloseRequested) {
+            self.close_debugger();
+            return;
+        }
+
+        let (Some(calc), Some(debug)) = (self.calculator.as_mut(), self.debug.as_mut()) else {
+            return;
+        };
+        let window = debug.window.clone();
+
+        match event {
+            WindowEvent::Resized(size) => {
+                debug.gpu.resize_surface(size.width, size.height);
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                debug.cursor = (position.x, position.y);
+            }
+
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                use winit::keyboard::{Key, NamedKey};
+                // `F12` toggles from either window, so the debugger can be closed
+                // from the window it opened.
+                if matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
+                    self.close_debugger();
+                    return;
+                }
+                let Some(key) = debug_key(&event.logical_key) else {
+                    return;
+                };
+                if key == DebugKey::Leave {
+                    self.close_debugger();
+                    return;
+                }
+                let size = window.inner_size();
+                debug
+                    .session
+                    .key(&mut calc.machine.emulator, size.width, size.height, key);
+                window.set_title(&format!(
+                    "fx-991CN X -- debugger -- {}",
+                    debug.session.status()
+                ));
+                window.request_redraw();
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button != WinitButton::Left || state != ElementState::Pressed {
+                    return;
+                }
+                let size = window.inner_size();
+                let (x, y) = debug.cursor;
+                debug.session.click(
+                    &mut calc.machine.emulator,
+                    size.width,
+                    size.height,
+                    x as u32,
+                    y as u32,
+                );
+                window.request_redraw();
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, lines) => lines as isize,
                     // A pixel delta is reported by trackpads; three lines is a
@@ -635,66 +804,22 @@ impl ApplicationHandler for App {
                         }
                     }
                 };
-                if lines != 0 {
-                    if let Some(session) = self.debug.as_mut() {
-                        session.key(&mut machine.emulator, DebugKey::Scroll(lines));
-                    }
-                    window.request_redraw();
+                if lines == 0 {
+                    return;
                 }
+                let size = window.inner_size();
+                debug.session.key(
+                    &mut calc.machine.emulator,
+                    size.width,
+                    size.height,
+                    DebugKey::Scroll(lines),
+                );
+                window.request_redraw();
             }
 
-            WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::RedrawRequested => self.redraw_debugger(event_loop),
 
             _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let (Some(window), Some(machine)) = (self.window.clone(), self.machine.as_mut()) else {
-            return;
-        };
-
-        // The debugger drives the machine itself, in slices, and redraws when
-        // something changed.  The calculator's throttle is left alone: entering
-        // the debugger does not disturb it, and leaving restarts it.
-        if self.mode == Mode::Debugger {
-            let Some(session) = self.debug.as_mut() else {
-                return;
-            };
-            if session.state() == debug::RunState::Running {
-                if session.run_slice(&mut machine.emulator) {
-                    // Still going: come back for the next slice immediately.
-                    window.request_redraw();
-                } else {
-                    // The run ended.  A breakpoint or a watch is worth a line on
-                    // stdout as well as in the title: a long run that stops
-                    // somewhere unexpected is exactly when a log helps.
-                    if let Some(reason) = session.stop() {
-                        println!("stopped: {}", fx991_dbgui::stop_text(reason));
-                    }
-                    window.set_title(&format!("fx-991CN X -- debugger -- {}", session.status()));
-                    window.request_redraw();
-                }
-            }
-            return;
-        }
-
-        // Pace the emulator to the real hardware's rate, then run one batch.
-        if let Some(delay) = machine.throttle.next_delay(Instant::now()) {
-            if !delay.is_zero() {
-                std::thread::sleep(delay);
-            }
-        }
-        machine.run_batch();
-
-        // Redraw only when the machine says something visible changed.  The
-        // frame request covers the screen buffer and the key highlights; a
-        // resize is handled by the surface itself.
-        if machine.emulator.chipset.take_frame_request() {
-            window.request_redraw();
-            if std::env::var_os("FX991_TRACE_INPUT").is_some() {
-                log_input_state(&mut machine.emulator);
-            }
         }
     }
 }

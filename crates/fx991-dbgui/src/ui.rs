@@ -56,18 +56,29 @@ pub enum Action {
 pub struct DebuggerUi {
     /// Which panel the keyboard is aimed at.
     focus: Panel,
-    /// How far each panel is scrolled.
-    disassembly_scroll: isize,
+    /// How many rows the memory panel is scrolled by.
     memory_scroll: usize,
     /// The address the memory panel shows.
     memory_address: u32,
+    /// The address the disassembly panel's first line shows.
+    ///
+    /// Only consulted while [`DebuggerUi::following`] is set: otherwise the panel
+    /// is anchored to the PC and this is ignored.  Stored rather than derived so
+    /// that scrolling away and following the machine again both work.
+    disassembly_start: u32,
+    /// Whether the disassembly panel is anchored to the PC.
+    ///
+    /// True by default, because a debugger's listing is normally about where the
+    /// machine is.  Scrolling clears it, so the view stays where the user put it
+    /// instead of snapping back on the next step.
+    following: bool,
     /// How the machine last stopped, for the toolbar.
     stop: Option<StopReason>,
     /// Whether a run is in progress, so the front end keeps ticking.
     running: bool,
     /// Metrics used when no font is loaded.
     metrics: Metrics,
-    /// Where the memory panel's address was set from, for tests.
+    /// The loaded font, when there is one.
     font: Option<FontSet>,
 }
 
@@ -85,7 +96,8 @@ impl DebuggerUi {
     pub fn new() -> Self {
         Self {
             focus: Panel::Disassembly,
-            disassembly_scroll: 0,
+            disassembly_start: 0,
+            following: true,
             memory_scroll: 0,
             memory_address: 0x0_D180,
             stop: None,
@@ -107,6 +119,15 @@ impl DebuggerUi {
             font: Some(font),
             ..Self::new()
         }
+    }
+
+    /// Take the font back out, for a front end closing the window.
+    ///
+    /// A window's GPU side goes with the window, but the font is the user's file
+    /// and rasterising it is the slow part; handing it back lets a reopened
+    /// window draw without reading and parsing it again.
+    pub fn take_font(&mut self) -> Option<FontSet> {
+        self.font.take()
     }
 
     /// Whether a font is loaded, i.e. whether [`DebuggerUi::render`] can draw.
@@ -158,20 +179,81 @@ impl DebuggerUi {
         self.memory_scroll = 0;
     }
 
+    /// Whether the disassembly is anchored to the PC.
+    pub fn is_following(&self) -> bool {
+        self.following
+    }
+
+    /// Anchor the disassembly to the PC again.
+    ///
+    /// What "follow the machine" means, and the way back from having scrolled
+    /// somewhere else.
+    pub fn follow_pc(&mut self) {
+        self.following = true;
+    }
+
+    /// The address the disassembly panel's first line shows.
+    ///
+    /// The PC's window while following, and wherever the user scrolled otherwise.
+    pub fn disassembly_start(
+        &mut self,
+        emu: &mut Emu,
+        debugger: &mut Debugger,
+        rows: usize,
+    ) -> u32 {
+        if self.following {
+            panels::disassembly_start_at_pc(debugger, emu, rows)
+        } else {
+            self.disassembly_start
+        }
+    }
+
     /// The layout for a frame of this size.
     pub fn layout(&self, width: u32, height: u32) -> Layout {
         Layout::new(width, height, &self.metrics)
     }
 
-    /// Scroll a panel by whole rows.
+    /// Scroll a panel by whole rows, in a frame of this size.
     ///
-    /// The disassembly scrolls relative to the PC -- the window follows the
-    /// machine -- so its offset is signed; the others scroll their own content
-    /// and cannot go above their first row.
-    pub fn scroll(&mut self, panel: Panel, rows: isize) {
+    /// The disassembly scrolls by moving its anchor one instruction at a time
+    /// rather than by a row count: instructions are 2 or 4 bytes, so an address
+    /// has to be walked to stay on an instruction boundary.  Scrolling also stops
+    /// it following the PC, which is what makes the view stay put while the
+    /// machine keeps running.
+    ///
+    /// The frame size is passed in for the same reason [`DebuggerUi::click`]
+    /// takes it: how far the anchor moves depends on how many rows are visible,
+    /// which is a property of the frame.
+    pub fn scroll(
+        &mut self,
+        emu: &mut Emu,
+        debugger: &mut Debugger,
+        width: u32,
+        height: u32,
+        panel: Panel,
+        rows: isize,
+    ) {
         match panel {
             Panel::Disassembly => {
-                self.disassembly_scroll = self.disassembly_scroll.saturating_add(rows);
+                if rows == 0 {
+                    return;
+                }
+                let visible = self.layout(width, height).disassembly.rows(&self.metrics);
+                // The anchor has to be resolved before it can move, because while
+                // following it is derived from the PC rather than stored.
+                if self.following {
+                    self.disassembly_start =
+                        panels::disassembly_start_at_pc(debugger, emu, visible);
+                    self.following = false;
+                }
+                for _ in 0..rows.unsigned_abs() {
+                    self.disassembly_start = if rows > 0 {
+                        panels::next_row(debugger, emu, self.disassembly_start)
+                    } else {
+                        panels::previous_row(debugger, emu, self.disassembly_start)
+                            .unwrap_or(self.disassembly_start)
+                    };
+                }
             }
             Panel::Memory => {
                 // One row is 16 bytes, so a row of scroll is 16 bytes of space.
@@ -209,8 +291,8 @@ impl DebuggerUi {
         self.set_focus(panel);
 
         // The disassembly's rows carry addresses, so a click there sets a
-        // breakpoint.  The mapping is the same one the draw used: the window is
-        // anchored at the PC, so a row index is an offset from it.
+        // breakpoint.  The mapping is the same one the draw used: row `n` is the
+        // `n`th instruction from the window's anchor.
         if panel == Panel::Disassembly {
             let rect = layout.disassembly;
             let Some(row) = rect.row_at(&self.metrics, y) else {
@@ -235,11 +317,11 @@ impl DebuggerUi {
         row: usize,
     ) -> Option<u32> {
         let rows = rect.rows(&self.metrics);
-        let before = (rows / 2) as isize + self.disassembly_scroll;
-        let before = before.max(0) as usize;
-        let after = rows.saturating_sub(before + 1);
-        let insns = debugger.disassemble_insns_at_pc(emu, before, after);
-        insns.get(row).map(|insn| insn.address)
+        let start = self.disassembly_start(emu, debugger, rows);
+        debugger
+            .disassemble_insns(emu, start, rows)
+            .get(row)
+            .map(|insn| insn.address)
     }
 
     /// Compose a frame for the current state.
@@ -295,7 +377,8 @@ impl DebuggerUi {
         );
 
         let rows = layout.disassembly.rows(&self.metrics);
-        let content = panels::disassembly(debugger, emu, rows, self.disassembly_scroll);
+        let start = self.disassembly_start(emu, debugger, rows);
+        let content = panels::disassembly(debugger, emu, start, rows);
         self.draw_panel(
             canvas,
             font,
@@ -325,14 +408,13 @@ impl DebuggerUi {
         );
     }
 
-    /// Draw one panel: its chrome, its title, and its rows.
-    fn draw_panel(
+    /// Draw a panel's background, border and title.
+    fn draw_chrome(
         &mut self,
         canvas: &mut Canvas<'_>,
         font: &mut FontSet,
         rect: Rect,
         panel: Panel,
-        content: &Content,
     ) {
         let focused = panel == self.focus && panel.is_scrollable();
         canvas.fill(
@@ -368,7 +450,18 @@ impl DebuggerUi {
             if focused { theme::CURRENT } else { theme::TEXT },
             title_rect,
         );
+    }
 
+    /// Draw one text panel: its chrome and then its rows.
+    fn draw_panel(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        font: &mut FontSet,
+        rect: Rect,
+        panel: Panel,
+        content: &Content,
+    ) {
+        self.draw_chrome(canvas, font, rect, panel);
         let content_rect = rect.content(&self.metrics);
         let rows = rect.rows(&self.metrics);
         for (index, row) in content.rows.iter().take(rows).enumerate() {
@@ -472,23 +565,31 @@ mod tests {
         assert_eq!(ui.focus(), Panel::Memory, "the toolbar kept the focus");
     }
 
+    /// A frame size for the scroll tests: any size with room for rows works, and
+    /// the row count only decides how far the PC's window reaches.
+    const FRAME: (u32, u32) = (MIN_WIDTH, MIN_HEIGHT);
+
     #[test]
     fn the_memory_panel_moves_sixteen_bytes_a_row() {
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
         let mut ui = DebuggerUi::new();
         let start = ui.memory_address();
-        ui.scroll(Panel::Memory, 1);
+        ui.scroll(&mut emu, &mut debugger, FRAME.0, FRAME.1, Panel::Memory, 1);
         assert_eq!(ui.memory_address(), start + 16);
-        ui.scroll(Panel::Memory, -1);
+        ui.scroll(&mut emu, &mut debugger, FRAME.0, FRAME.1, Panel::Memory, -1);
         assert_eq!(ui.memory_address(), start);
     }
 
     #[test]
     fn the_memory_panel_wraps_rather_than_running_off_the_top() {
+        let mut emu = emu();
+        let mut debugger = Debugger::new();
         let mut ui = DebuggerUi::new();
         ui.goto_memory(0);
         // Scrolling above zero wraps in the 24-bit space, which is what the
         // address arithmetic does everywhere else.
-        ui.scroll(Panel::Memory, -1);
+        ui.scroll(&mut emu, &mut debugger, FRAME.0, FRAME.1, Panel::Memory, -1);
         assert_eq!(ui.memory_address(), 0x00FF_FFF0);
     }
 

@@ -207,8 +207,9 @@ impl Layout {
         // for both whatever the font's cell height is.
         let toolbar_h = TOOLBAR_H.max(metrics.title_h + metrics.pad * 2 + metrics.cell_h);
 
-        // A right column that is a share of the width, but never narrower than
-        // the register names plus a value.
+        // The right column is a share of the width, but never narrower than the
+        // register names plus a value, and never narrower than the display --
+        // which is a fixed-size picture and cannot be squeezed.
         let right_w = (width * RIGHT_COLUMN_NUM / RIGHT_COLUMN_DEN).max(RIGHT_COLUMN_MIN);
         let left_w = width.saturating_sub(right_w + gap);
 
@@ -412,7 +413,10 @@ mod tests {
     }
 
     #[test]
-    fn the_toolbar_is_not_scrollable() {
+    fn the_panels_that_are_not_views_onto_data_do_not_take_the_keyboard() {
+        // The toolbar is a strip of controls and the display is a fixed picture
+        // of a fixed-size screen: neither has rows to scroll or a cursor to put
+        // somewhere, so neither can be the focused panel.
         assert!(!Panel::Toolbar.is_scrollable());
         for panel in Panel::ALL.iter().filter(|p| **p != Panel::Toolbar) {
             assert!(panel.is_scrollable(), "{panel:?} should scroll");

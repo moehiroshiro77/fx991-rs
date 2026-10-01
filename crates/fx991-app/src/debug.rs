@@ -112,8 +112,19 @@ impl DebugSession {
         self.ui.focus()
     }
 
-    /// Handle a key press.
-    pub fn key(&mut self, emu: &mut Emu, key: Key) {
+    /// Take the font back out, for a front end closing the window.
+    pub fn take_font(&mut self) -> fx991_dbgui::FontSet {
+        self.ui
+            .take_font()
+            .expect("a session is only built with a font")
+    }
+
+    /// Handle a key press, in a frame of `width` x `height`.
+    ///
+    /// The frame size is needed because scrolling the disassembly moves its
+    /// anchor by whole instructions, and how far one step of scroll goes depends
+    /// on how many rows are on screen.
+    pub fn key(&mut self, emu: &mut Emu, width: u32, height: u32, key: Key) {
         match key {
             Key::Run => self.start_run(),
             Key::Pause => {
@@ -129,12 +140,16 @@ impl DebugSession {
             }
             Key::FollowPc => {
                 self.ui.goto_pc(emu);
-                self.ui.set_focus(Panel::Memory);
+                // Both halves of "follow the machine": the memory panel points at
+                // it, and the disassembly re-anchors to it.
+                self.ui.follow_pc();
+                self.ui.set_focus(Panel::Disassembly);
             }
             Key::NextPanel => self.cycle_focus(),
             Key::Scroll(rows) => {
                 let panel = self.ui.focus();
-                self.ui.scroll(panel, rows);
+                self.ui
+                    .scroll(emu, &mut self.debugger, width, height, panel, rows);
             }
             Key::Leave => {
                 self.state = RunState::Paused;
@@ -292,6 +307,14 @@ mod tests {
         DebugSession::new(DebuggerUi::new())
     }
 
+    /// Press a key at a frame size the panels have room in.
+    ///
+    /// The size only matters for scrolling the disassembly, which moves its
+    /// anchor by whole instructions; the rest of the state machine ignores it.
+    fn press(session: &mut DebugSession, emu: &mut Emu, key: Key) {
+        session.key(emu, MIN_WIDTH, MIN_HEIGHT, key);
+    }
+
     #[test]
     fn a_new_session_is_paused_and_has_done_nothing() {
         let session = session();
@@ -305,7 +328,7 @@ mod tests {
         let mut emu = emu();
         let mut session = session();
         let before = emu.pc();
-        session.key(&mut emu, Key::Step);
+        press(&mut session, &mut emu, Key::Step);
         assert_ne!(emu.pc(), before, "the machine moved");
         assert_eq!(session.state(), RunState::Paused, "and is held");
         assert!(session.stop().is_some());
@@ -316,7 +339,7 @@ mod tests {
         let mut emu = emu();
         let mut session = session();
         for _ in 0..3 {
-            session.key(&mut emu, Key::Step);
+            press(&mut session, &mut emu, Key::Step);
         }
         assert_eq!(emu.pc(), 0x1_0006, "three two-byte instructions");
     }
@@ -327,7 +350,7 @@ mod tests {
         let mut session = session();
         // Break at the third instruction.
         session.toggle_breakpoint(0x1_0004);
-        session.key(&mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Run);
         assert_eq!(session.state(), RunState::Running);
 
         // Drive slices until the run ends.
@@ -349,7 +372,7 @@ mod tests {
     fn a_run_with_no_breakpoints_keeps_going() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Run);
         // One slice is a budget, not a stop: the machine is still running.
         assert!(session.run_slice(&mut emu), "the run continues");
         assert_eq!(session.state(), RunState::Running);
@@ -359,9 +382,9 @@ mod tests {
     fn pausing_ends_a_run() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Run);
         assert!(session.run_slice(&mut emu));
-        session.key(&mut emu, Key::Pause);
+        press(&mut session, &mut emu, Key::Pause);
         assert_eq!(session.state(), RunState::Paused);
         assert_eq!(session.stop(), Some(&StopReason::Paused));
         // And a slice does nothing once paused.
@@ -381,7 +404,7 @@ mod tests {
     fn the_breakpoint_key_uses_the_current_pc() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::ToggleBreakpoint);
+        press(&mut session, &mut emu, Key::ToggleBreakpoint);
         let armed: Vec<u32> = session
             .debugger
             .breakpoints()
@@ -391,12 +414,20 @@ mod tests {
     }
 
     #[test]
-    fn following_the_pc_points_the_memory_panel_at_it() {
+    fn following_the_pc_re_anchors_both_panels_that_track_it() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::FollowPc);
-        assert_eq!(session.ui.memory_address(), emu.pc());
-        assert_eq!(session.focus(), Panel::Memory, "and focuses it");
+
+        // Scroll the disassembly away first, so following has something to undo.
+        press(&mut session, &mut emu, Key::Scroll(3));
+        assert!(!session.ui.is_following(), "scrolling left the PC");
+
+        press(&mut session, &mut emu, Key::FollowPc);
+        assert_eq!(session.ui.memory_address(), emu.pc(), "the dump follows it");
+        assert!(session.ui.is_following(), "and the listing re-anchors");
+        // The listing is what "follow the machine" is about, so that is where the
+        // keyboard goes.
+        assert_eq!(session.focus(), Panel::Disassembly);
     }
 
     #[test]
@@ -405,7 +436,7 @@ mod tests {
         let mut session = session();
         let mut seen = Vec::new();
         for _ in 0..Panel::ALL.len() {
-            session.key(&mut emu, Key::NextPanel);
+            press(&mut session, &mut emu, Key::NextPanel);
             seen.push(session.focus());
         }
         assert!(
@@ -422,10 +453,30 @@ mod tests {
     fn scrolling_moves_the_focused_panel() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::FollowPc);
+
+        // The memory dump scrolls by whole 16-byte rows.
+        session.ui.set_focus(Panel::Memory);
         let before = session.ui.memory_address();
-        session.key(&mut emu, Key::Scroll(2));
+        press(&mut session, &mut emu, Key::Scroll(2));
         assert_eq!(session.ui.memory_address(), before + 32);
+
+        // The disassembly scrolls by whole instructions instead, and stops
+        // following the machine when it does.
+        session.ui.set_focus(Panel::Disassembly);
+        let rows = session
+            .ui
+            .layout(MIN_WIDTH, MIN_HEIGHT)
+            .disassembly
+            .rows(session.ui.metrics());
+        let start = session
+            .ui
+            .disassembly_start(&mut emu, &mut session.debugger, rows);
+        press(&mut session, &mut emu, Key::Scroll(1));
+        assert!(!session.ui.is_following(), "it stopped following");
+        let moved = session
+            .ui
+            .disassembly_start(&mut emu, &mut session.debugger, rows);
+        assert_ne!(moved, start, "the listing moved");
     }
 
     #[test]
@@ -435,7 +486,7 @@ mod tests {
         assert_eq!(session.status(), "paused -- Disassembly");
 
         session.toggle_breakpoint(0x1_0004);
-        session.key(&mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Run);
         assert!(
             session.status().starts_with("running"),
             "{}",
@@ -475,8 +526,8 @@ mod tests {
     fn leaving_holds_the_machine() {
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::Run);
-        session.key(&mut emu, Key::Leave);
+        press(&mut session, &mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Leave);
         assert_eq!(session.state(), RunState::Paused);
     }
 
@@ -487,7 +538,7 @@ mod tests {
         // a step, which is what the assertion below pins.
         let mut emu = emu();
         let mut session = session();
-        session.key(&mut emu, Key::StepOver);
+        press(&mut session, &mut emu, Key::StepOver);
         assert_eq!(emu.pc(), 0x1_0002);
         assert_eq!(session.state(), RunState::Paused);
     }
@@ -497,7 +548,7 @@ mod tests {
         let mut emu = emu();
         let mut session = session();
         let id = session.debugger.add_breakpoint_at(0x1_0002);
-        session.key(&mut emu, Key::Run);
+        press(&mut session, &mut emu, Key::Run);
         let mut guard = 0;
         while session.run_slice(&mut emu) {
             guard += 1;

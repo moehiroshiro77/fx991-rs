@@ -94,6 +94,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// Fill a rectangle, clipped to the frame.
+    ///
+    /// The colour is written through, alpha and all.
     pub fn fill(&mut self, rect: Rect, colour: Rgba) {
         let x0 = rect.x;
         let y0 = rect.y;
